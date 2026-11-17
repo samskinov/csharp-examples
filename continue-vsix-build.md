@@ -3,6 +3,36 @@
 Instructions pour compiler l'extension VS Code **Continue v2.1.0** avec le patch
 [`continue-improvements.patch`](./continue-improvements.patch) (14 commits), sur **Windows** avec **Node 24**.
 
+## Patch optionnel n°2 — CLI : chat + modes agent/plan + tools text
+
+[`continue-cli-modes.patch`](./continue-cli-modes.patch) s'applique **après** le premier patch
+(`git am continue-improvements.patch` puis `git am continue-cli-modes.patch`) et ajoute au **CLI** :
+
+- **Mode chat** (sans tools, conversation simple) — mode de permission `chat`, dans le cycle Shift+Tab
+  et via `--mode chat` :
+  ```powershell
+  cn --mode chat          # conversation pure, aucun outil offert au modèle
+  cn --mode plan          # lecture seule (existant)
+  cn --mode normal        # agent avec approbations (existant)
+  cn --mode auto          # tout permis (existant)
+  ```
+- **Mode tools `text`** pour serveurs OpenAI-compatibles au function calling peu fiable :
+  les outils sont décrits dans le system message et les appels sont parsés depuis des blocs
+  ```` ```tool ```` de la réponse — le paramètre natif `tools` n'est **jamais** envoyé.
+  ```powershell
+  cn --tool-mode text                 # au démarrage
+  cn                                  # puis dans l'interface :
+  #   /tool-mode          -> bascule native <-> text
+  #   /tool-mode text     -> force text
+  #   Shift+Tab           -> cycle normal/plan/auto/chat
+  #   l'indicateur affiche [⏸ plan · tools:text] etc.
+  ```
+- Combinable : `cn --mode plan --tool-mode text` ; en mode chat, aucun outil n'est proposé
+  (text ou natif) et le system message est dédié à la conversation.
+- Validation : tsc CLI ✅, suites vitest CLI impactées **172+ tests ✓** (textToolMode,
+  flagProcessor, ToolPermissionService, systemMessage, slashCommands, stream, ModeIndicator,
+  SystemMessageService), empilement `git am` patch1+patch2 vérifié sur `main`.
+
 > ⚠️ Le VSIX `win32-x64` doit être compilé **depuis Windows** : les modules natifs
 > (LanceDB, sqlite, ripgrep) sont copiés pour la plateforme de build. La CI officielle
 > compile chaque cible sur son propre runner. Ne cross-compilez pas depuis Linux —
