@@ -5,7 +5,7 @@ Instructions pour compiler l'extension VS Code **Continue v2.1.0** avec le patch
 
 ## Patch optionnel n°2 — CLI : chat + modes agent/plan + tools text + résilience
 
-[`continue-cli-modes.patch`](./continue-cli-modes.patch) (3 commits) s'applique **après** le premier patch
+[`continue-cli-modes.patch`](./continue-cli-modes.patch) (**4 commits**) s'applique **après** le premier patch
 (`git am continue-improvements.patch` puis `git am continue-cli-modes.patch`) et ajoute au **CLI** :
 
 - **Mode chat** (sans tools, conversation simple) — mode de permission `chat`, dans le cycle Shift+Tab
@@ -164,7 +164,15 @@ GITHUB_TOKEN="<token>" npm run package -- --target linux-x64
   gui (`tsc` + `vite build`) → extensions/vscode (`esbuild`, bundle `out/extension.js`
   généré avec le patch complet).
 - Tests : vitest OpenAI **304/304**, jest `openaiTypeConverters`+`countTokens` **63 ✓**,
-  jest `util/history` **18/18**, tests GUI stream **16/16**.
-- `git am` vérifié sur `main` propre : **14/14 commits**.
+  jest `util/history` **18/18**, tests GUI stream **16/16** (patch 1) ;
+  **480+ tests CLI ✓** dont 4 sur la résilience mid-stream, tests GUI stream **16/16** (patch 2).
+- `git am` vérifié sur `main` propre : **14/14 commits** (patch 1),
+  puis **4/4** en empilement (patch 2) — **18 commits** au total.
 - Le pas final `vsce package` est celui de la CI officielle
   (`.github/actions/build-vscode-extension/action.yml`) ; à exécuter sur votre machine.
+
+> ⚠️ **Ordre et fichiers** : deux patchs uniquement, dans cet ordre —
+> 1. `continue-improvements.patch`, 2. `continue-cli-modes.patch`.
+> Un ancien fichier `continue-cli-chatmode.patch` (rename du patch 2 dans sa
+> version 1-commit) a été **retiré du repo** : son contenu est inclus dans
+> `continue-cli-modes.patch` — l'appliquer en plus échouerait en conflits.
