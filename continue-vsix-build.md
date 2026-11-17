@@ -39,11 +39,15 @@ Instructions pour compiler l'extension VS Code **Continue v2.1.0** avec le patch
 - **Token estimation hybride** : les textes > 20k chars utilisent une estimation
   (fini les freezes de l'UI pendant la validation de contexte)
 - **Télémétrie strictement opt-in** : `CONTINUE_CLI_ENABLE_TELEMETRY=1` requis
+- **GUI VS Code** (commit 4 du patch) : `StepContainer` (rendu markdown des messages
+  assistant) **mémoïsé** → pendant un stream, seul le message en cours se re-rend
+  (avant : toute l'historique visible ~8-20×/s) ; poll du stream webview 50 ms → **120 ms**
 - Combinable : `cn --mode plan --tool-mode text` ; en mode chat, aucun outil n'est proposé
   (text ou natif) et le system message est dédié à la conversation.
 - Validation : tsc CLI ✅, **480+ tests vitest CLI ✓** (dont 4 nouveaux sur la résilience :
   continuation sans duplication, nudge thinking-only, épuisement des retries,
-  pas de double-reprise connection-phase), empilement `git am` patch1+patch2 vérifié sur `main`.
+  pas de double-reprise connection-phase), GUI `tsc` + tests stream **16/16 ✓**,
+  empilement `git am` patch1+patch2 vérifié sur `main`.
 
 > ⚠️ Le VSIX `win32-x64` doit être compilé **depuis Windows** : les modules natifs
 > (LanceDB, sqlite, ripgrep) sont copiés pour la plateforme de build. La CI officielle
