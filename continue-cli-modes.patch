@@ -1,7 +1,7 @@
 From 75370956265bf8de75af60fa79436171c5f4b0e1 Mon Sep 17 00:00:00 2001
 From: sam <sam@local>
 Date: Tue, 17 Nov 2026 22:02:32 +0100
-Subject: [PATCH 1/3] feat(cli): chat mode + agent/plan with selectable text
+Subject: [PATCH 1/4] feat(cli): chat mode + agent/plan with selectable text
  tool mode
 
 - new "chat" permission mode (Shift+Tab cycle, --mode chat): plain
@@ -970,7 +970,7 @@ index 30cbd558c..1a8716a4b 100644
 From 825aa49b87bcb88beabe27c87f14ecc15ece9865 Mon Sep 17 00:00:00 2001
 From: sam <sam@local>
 Date: Tue, 17 Nov 2026 23:07:01 +0100
-Subject: [PATCH 2/3] feat(cli): mid-stream resilience + live streaming display
+Subject: [PATCH 2/4] feat(cli): mid-stream resilience + live streaming display
 
 Modeled on Gemini CLI's mid-stream retries (geminiChat.ts):
 
@@ -2163,7 +2163,7 @@ index 8f3004ae9..290c73a5d 100644
 From b1c7306d0552c9a1d0631041b5cd51d075c00ec6 Mon Sep 17 00:00:00 2001
 From: sam <sam@local>
 Date: Tue, 17 Nov 2026 23:07:11 +0100
-Subject: [PATCH 3/3] perf(cli): hybrid token estimation, telemetry strictly
+Subject: [PATCH 3/4] perf(cli): hybrid token estimation, telemetry strictly
  opt-in
 
 - token counting for large texts (>20k chars) switches from exact
@@ -2266,6 +2266,80 @@ index c1c4d6fa0..32e8cc9dd 100644
        tokenCount += encode(contextItem.name).length;
        tokenCount += 5; // Context item structure overhead
      }
+-- 
+2.53.0
+
+
+From 78b4790b135007a4491da00c85e86c925f23375f Mon Sep 17 00:00:00 2001
+From: sam <sam@local>
+Date: Tue, 17 Nov 2026 23:23:47 +0100
+Subject: [PATCH 4/4] perf(gui): memoize assistant messages, tune stream
+ batching to ~120ms
+
+- StepContainer (the assistant message renderer, with the expensive
+  StyledMarkdownPreview) is now memoized: during streaming only the
+  message actually being streamed re-renders, since unchanged history
+  items keep their identity in the redux store - previously the whole
+  visible history re-rendered on every stream batch, growing jank with
+  session size (the webview equivalent of Gemini CLI's static/dynamic
+  split and the CLI's batched flush)
+- the webview stream poll goes from 50ms to 120ms: half the re-renders,
+  the stream stays visually live
+---
+ gui/src/components/StepContainer/StepContainer.tsx | 13 +++++++++++--
+ gui/src/context/IdeMessenger.tsx                   |  5 ++++-
+ 2 files changed, 15 insertions(+), 3 deletions(-)
+
+diff --git a/gui/src/components/StepContainer/StepContainer.tsx b/gui/src/components/StepContainer/StepContainer.tsx
+index fc6981d05..fa90869e3 100644
+--- a/gui/src/components/StepContainer/StepContainer.tsx
++++ b/gui/src/components/StepContainer/StepContainer.tsx
+@@ -1,6 +1,6 @@
+ import { ChatHistoryItem } from "core";
+ import { renderChatMessage, stripImages } from "core/util/messageContent";
+-import { useEffect, useState } from "react";
++import { memo, useEffect, useState } from "react";
+ import { useDispatch } from "react-redux";
+ import { useAppSelector } from "../../redux/hooks";
+ import { selectUIConfig } from "../../redux/slices/configSlice";
+@@ -18,7 +18,7 @@ interface StepContainerProps {
+   latestSummaryIndex?: number;
+ }
+ 
+-export default function StepContainer(props: StepContainerProps) {
++function StepContainer(props: StepContainerProps) {
+   const dispatch = useDispatch();
+   const [isTruncated, setIsTruncated] = useState(false);
+   const isStreaming = useAppSelector((state) => state.session.isStreaming);
+@@ -137,3 +137,12 @@ export default function StepContainer(props: StepContainerProps) {
+     </div>
+   );
+ }
++
++/**
++ * Memoized so that during streaming only the message actually being
++ * streamed re-renders: unchanged history items keep their identity in the
++ * redux store, so their props stay equal and the (expensive) markdown
++ * preview is skipped. Without this, the whole visible history re-renders
++ * on every stream batch (~8-20 per second).
++ */
++export default memo(StepContainer);
+diff --git a/gui/src/context/IdeMessenger.tsx b/gui/src/context/IdeMessenger.tsx
+index ab028a139..2c16f289e 100644
+--- a/gui/src/context/IdeMessenger.tsx
++++ b/gui/src/context/IdeMessenger.tsx
+@@ -227,7 +227,10 @@ export class IdeMessenger implements IIdeMessenger {
+           index = buffer.length;
+           yield chunks;
+         }
+-        await new Promise((resolve) => setTimeout(resolve, 50));
++        // Batch the webview -> UI updates: dispatching per token would
++        // re-render the chat 60x/second; a ~120ms cadence matches the CLI's
++        // streaming flush and keeps the stream visually live.
++        await new Promise((resolve) => setTimeout(resolve, 120));
+       }
+ 
+       if (buffer.length > index) {
 -- 
 2.53.0
 
