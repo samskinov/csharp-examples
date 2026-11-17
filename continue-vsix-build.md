@@ -3,9 +3,9 @@
 Instructions pour compiler l'extension VS Code **Continue v2.1.0** avec le patch
 [`continue-improvements.patch`](./continue-improvements.patch) (14 commits), sur **Windows** avec **Node 24**.
 
-## Patch optionnel n°2 — CLI : chat + modes agent/plan + tools text
+## Patch optionnel n°2 — CLI : chat + modes agent/plan + tools text + résilience
 
-[`continue-cli-modes.patch`](./continue-cli-modes.patch) s'applique **après** le premier patch
+[`continue-cli-modes.patch`](./continue-cli-modes.patch) (3 commits) s'applique **après** le premier patch
 (`git am continue-improvements.patch` puis `git am continue-cli-modes.patch`) et ajoute au **CLI** :
 
 - **Mode chat** (sans tools, conversation simple) — mode de permission `chat`, dans le cycle Shift+Tab
@@ -27,11 +27,23 @@ Instructions pour compiler l'extension VS Code **Continue v2.1.0** avec le patch
   #   Shift+Tab           -> cycle normal/plan/auto/chat
   #   l'indicateur affiche [⏸ plan · tools:text] etc.
   ```
+- **Résilience mid-stream** (inspirée des mid-stream retries de Gemini CLI) :
+  - 429/5xx/connexions coupées → jusqu'à 3 retries (backoff 1s/2s/4s)
+  - **continuation** : réponse partielle renvoyée en prefill assistant → le modèle **continue**
+    sans régénérer ni dupliquer ; stream thinking-only/vide → retry avec un nudge
+    « provide your final answer » ; une fois le budget épuisé, l'erreur s'affiche
+  - **watchdog d'inactivité** par chunk (120 s par défaut, `CONTINUE_CLI_IDLE_TIMEOUT_MS`, 0 = off) :
+    un serveur surchargé qui se tait est traité comme une panne retryable
+- **Streaming live** dans le TUI : le contenu en cours s'affiche par lots (~120 ms)
+  au lieu d'apparaître seulement à la fin
+- **Token estimation hybride** : les textes > 20k chars utilisent une estimation
+  (fini les freezes de l'UI pendant la validation de contexte)
+- **Télémétrie strictement opt-in** : `CONTINUE_CLI_ENABLE_TELEMETRY=1` requis
 - Combinable : `cn --mode plan --tool-mode text` ; en mode chat, aucun outil n'est proposé
   (text ou natif) et le system message est dédié à la conversation.
-- Validation : tsc CLI ✅, suites vitest CLI impactées **172+ tests ✓** (textToolMode,
-  flagProcessor, ToolPermissionService, systemMessage, slashCommands, stream, ModeIndicator,
-  SystemMessageService), empilement `git am` patch1+patch2 vérifié sur `main`.
+- Validation : tsc CLI ✅, **480+ tests vitest CLI ✓** (dont 4 nouveaux sur la résilience :
+  continuation sans duplication, nudge thinking-only, épuisement des retries,
+  pas de double-reprise connection-phase), empilement `git am` patch1+patch2 vérifié sur `main`.
 
 > ⚠️ Le VSIX `win32-x64` doit être compilé **depuis Windows** : les modules natifs
 > (LanceDB, sqlite, ripgrep) sont copiés pour la plateforme de build. La CI officielle
