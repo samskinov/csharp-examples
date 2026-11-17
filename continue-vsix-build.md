@@ -3,7 +3,7 @@
 Instructions pour compiler l'extension VS Code **Continue v2.1.0** avec le patch
 [`continue-improvements.patch`](./continue-improvements.patch) (14 commits), sur **Windows** avec **Node 24**.
 
-## Patch optionnel n°2 — CLI : chat + modes agent/plan + tools text + résilience
+## Patch optionnel n°2 
 
 [`continue-cli-modes.patch`](./continue-cli-modes.patch) (**4 commits**) s'applique **après** le premier patch
 (`git am continue-improvements.patch` puis `git am continue-cli-modes.patch`) et ajoute au **CLI** :
