@@ -65,13 +65,17 @@ node .\scripts\build-packages.js
 ::    --include=dev force les devDependencies (shiki, typescript, ...)
 ::    --ignore-scripts évite les téléchargements hors registry npm
 ::    (sharp/libvips et Chrome de puppeteer, inutiles au build) :
-cd core && npm install --include=dev --ignore-scripts --no-audit --no-fund && npm run build && cd ..
+cd core && npm ci --include=dev --ignore-scripts --no-audit --no-fund && npm run build && cd ..
 
 :: 3) gui et extensions : installation des dépendances
-cd gui && npm install --no-audit --no-fund && cd ..
-cd extensions\vscode && npm install --no-audit --no-fund && cd ..\..
-cd extensions\cli && npm install --no-audit --no-fund && cd ..\..
+cd gui && npm ci --no-audit --no-fund && cd ..
+cd extensions\vscode && npm ci --no-audit --no-fund && cd ..\..
+cd extensions\cli && npm ci --no-audit --no-fund && cd ..\..
 ```
+
+`npm ci` installe **exactement** les `package-lock.json` du patch et repart d'un
+`node_modules` propre. Pour ajouter ou modifier une dépendance, faites un
+`npm install` une fois (pour mettre à jour le lock), puis revenez à `npm ci`.
 
 ⚠️ En CMD, `&` **continue après un échec** ; `&&` s'arrête au premier échec.
 Chaque ligne ci-dessus est une étape : si elle renvoie un code ≠ 0
@@ -164,7 +168,7 @@ npm link                           :: (optionnel) commande `cn` globale
   `core/nextEdit/diff/diff.ts` — tsc les compile même s'ils ne sont pas
   utilisés au runtime. Si elle manque, l'install de core n'a pas abouti ou les
   devDependencies ont été omises (`NODE_ENV=production`, `--omit=dev`).
-  Relancer `npm install --include=dev --ignore-scripts` puis vérifier
+  Relancer `npm ci --include=dev --ignore-scripts` puis vérifier
   `dir node_modules\shiki`. Si elle reste absente, forcer :
   `npm install shiki@3.23.0 --save-dev --ignore-scripts --no-audit --no-fund`
   puis vérifier `node -p "require('./node_modules/shiki/package.json').version"`.
