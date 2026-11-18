@@ -1,0 +1,1248 @@
+From e5435bdad0aad1d9ba8545548d7b3bb189f7c5f2 Mon Sep 17 00:00:00 2001
+From: sam <sam@local>
+Date: Wed, 18 Nov 2026 13:25:31 +0100
+Subject: [PATCH] feat(sqlite): node-sqlite3-wasm backend - no native binding,
+ no GitHub download
+
+core's SQLite usage (devdata, autocomplete cache, refresh index, docs)
+now goes through core/util/sqliteBackend.ts: it prefers the native
+sqlite3 driver when its binding is available and transparently falls
+back to node-sqlite3-wasm (pure WASM, installed from the npm registry)
+when it is not - the last dependency on GitHub-hosted binaries is gone.
+
+- openDatabase() returns a unified promise-based surface (run/get/all/
+  exec/prepare/close) normalizing the raw-driver lastID onto run results
+- the raw-driver callback/serialize usage (LanceDbIndex, ChunkCodebaseIndex
+  transactions) is rewritten on the promise API so both backends work
+- sqlite3 + sqlite move to optionalDependencies: their failed install
+  scripts no longer abort npm install (the comment-json cascade)
+- node-sqlite3-wasm added to core/cli/vscode deps; CLI bundle marks it
+  external (its .wasm loads from the real module dir), vscode esbuild
+  marks it external + prepackage copies it into out/node_modules
+---
+ .../autocomplete/util/AutocompleteLruCache.ts |   9 +-
+ core/data/devdataSqlite.ts                    |   6 +-
+ core/indexing/LanceDbIndex.ts                 |  71 ++---
+ core/indexing/chunk/ChunkCodebaseIndex.ts     |  76 ++---
+ core/indexing/docs/DocsService.ts             |  11 +-
+ core/indexing/docs/migrations.ts              |   4 +-
+ core/indexing/refreshIndex.ts                 |  11 +-
+ core/package.json                             |   9 +-
+ core/util/sqliteBackend.test.ts               |  93 ++++++
+ core/util/sqliteBackend.ts                    | 191 ++++++++++++
+ extensions/cli/build.mjs                      |   1 +
+ extensions/cli/package.json                   |   3 +-
+ extensions/vscode/package.json                |   4 +-
+ extensions/vscode/scripts/esbuild.js          |   2 +-
+ extensions/vscode/scripts/prepackage.js       |  51 +---
+ extensions/vscode/src/VsCodeIde.ts            |  74 +----
+ extensions/vscode/src/util/nativeSearch.ts    | 287 ++++++++++++++++++
+ 17 files changed, 662 insertions(+), 241 deletions(-)
+ create mode 100644 core/util/sqliteBackend.test.ts
+ create mode 100644 core/util/sqliteBackend.ts
+ create mode 100644 extensions/vscode/src/util/nativeSearch.ts
+
+diff --git a/core/autocomplete/util/AutocompleteLruCache.ts b/core/autocomplete/util/AutocompleteLruCache.ts
+index 5bb637fe6..cc76989e7 100644
+--- a/core/autocomplete/util/AutocompleteLruCache.ts
++++ b/core/autocomplete/util/AutocompleteLruCache.ts
+@@ -1,6 +1,8 @@
+ import { Mutex } from "async-mutex";
+-import { open } from "sqlite";
+-import sqlite3 from "sqlite3";
++import {
++  openDatabase,
++  type SqliteDatabaseLike,
++} from "../../util/sqliteBackend";
+ import {
+   DatabaseConnection,
+   truncateSqliteLikePattern,
+@@ -39,9 +41,8 @@ export class AutocompleteLruCache {
+   static async get(): Promise<AutocompleteLruCache> {
+     if (!AutocompleteLruCache.instancePromise) {
+       AutocompleteLruCache.instancePromise = (async () => {
+-        const db = await open({
++        const db = await openDatabase({
+           filename: getTabAutocompleteCacheSqlitePath(),
+-          driver: sqlite3.Database,
+         });
+         await db.exec("PRAGMA busy_timeout = 3000;");
+         await db.run(`
+diff --git a/core/data/devdataSqlite.ts b/core/data/devdataSqlite.ts
+index bf713ca6c..371ebb170 100644
+--- a/core/data/devdataSqlite.ts
++++ b/core/data/devdataSqlite.ts
+@@ -1,7 +1,6 @@
+ import fs from "fs";
+ 
+-import { open } from "sqlite";
+-import sqlite3 from "sqlite3";
++import { openDatabase, type SqliteDatabaseLike } from "../util/sqliteBackend";
+ 
+ import { DatabaseConnection } from "../indexing/refreshIndex.js";
+ 
+@@ -78,9 +77,8 @@ export class DevDataSqliteDb {
+       return DevDataSqliteDb.db;
+     }
+ 
+-    DevDataSqliteDb.db = await open({
++    DevDataSqliteDb.db = await openDatabase({
+       filename: devDataSqlitePath,
+-      driver: sqlite3.Database,
+     });
+ 
+     await DevDataSqliteDb.db.exec("PRAGMA busy_timeout = 3000;");
+diff --git a/core/indexing/LanceDbIndex.ts b/core/indexing/LanceDbIndex.ts
+index e01518629..ec799789a 100644
+--- a/core/indexing/LanceDbIndex.ts
++++ b/core/indexing/LanceDbIndex.ts
+@@ -1,4 +1,4 @@
+-import { RunResult } from "sqlite3";
++import { SqliteRunResult } from "../util/sqliteBackend.js";
+ import { v4 as uuidv4 } from "uuid";
+ 
+ import { isSupportedLanceDbCpuTargetForLinux } from "../config/util";
+@@ -497,54 +497,29 @@ export class LanceDbIndex implements CodebaseIndex {
+     db: DatabaseConnection,
+     rows: LanceDbRow[],
+   ): Promise<void> {
+-    return new Promise<void>((resolve, reject) => {
+-      db.db.serialize(() => {
+-        db.db.exec("BEGIN", (err: Error | null) => {
+-          if (err) {
+-            reject(new Error("error creating transaction", { cause: err }));
+-          }
+-        });
+-
+-        const sql =
+-          "INSERT INTO lance_db_cache (uuid, cacheKey, path, artifact_id, vector, startLine, endLine, contents) VALUES (?, ?, ?, ?, ?, ?, ?, ?)";
+-        rows.map((r) => {
+-          db.db.run(
+-            sql,
+-            [
+-              r.uuid,
+-              r.cachekey,
+-              r.path,
+-              this.artifactId,
+-              JSON.stringify(r.vector),
+-              r.startLine,
+-              r.endLine,
+-              r.contents,
+-            ],
+-            (result: RunResult, err: Error) => {
+-              if (err) {
+-                reject(
+-                  new Error("error inserting into lance_db_cache table", {
+-                    cause: err,
+-                  }),
+-                );
+-              }
+-            },
+-          );
+-        });
+-        db.db.exec("COMMIT", (err: Error | null) => {
+-          if (err) {
+-            reject(
+-              new Error(
+-                "error while committing insert into lance_db_rows transaction",
+-                { cause: err },
+-              ),
+-            );
+-          } else {
+-            resolve();
+-          }
+-        });
++    const sql =
++      "INSERT INTO lance_db_cache (uuid, cacheKey, path, artifact_id, vector, startLine, endLine, contents) VALUES (?, ?, ?, ?, ?, ?, ?, ?)";
++    await db.exec("BEGIN");
++    try {
++      for (const r of rows) {
++        await db.run(sql, [
++          r.uuid,
++          r.cachekey,
++          r.path,
++          this.artifactId,
++          JSON.stringify(r.vector),
++          r.startLine,
++          r.endLine,
++          r.contents,
++        ]);
++      }
++      await db.exec("COMMIT");
++    } catch (error) {
++      await db.exec("ROLLBACK");
++      throw new Error("error inserting into lance_db_cache table", {
++        cause: error,
+       });
+-    });
++    }
+   }
+ 
+   private formatListPlurality(word: string, length: number): string {
+diff --git a/core/indexing/chunk/ChunkCodebaseIndex.ts b/core/indexing/chunk/ChunkCodebaseIndex.ts
+index c1cefb6f5..4ee312aac 100644
+--- a/core/indexing/chunk/ChunkCodebaseIndex.ts
++++ b/core/indexing/chunk/ChunkCodebaseIndex.ts
+@@ -1,7 +1,5 @@
+ import * as path from "path";
+ 
+-import { RunResult } from "sqlite3";
+-
+ import { IContinueServerClient } from "../../continueServer/interface.js";
+ import { Chunk, IndexTag, IndexingProgressUpdate } from "../../index.js";
+ import { DatabaseConnection, SqliteDb } from "../refreshIndex.js";
+@@ -203,57 +201,27 @@ export class ChunkCodebaseIndex implements CodebaseIndex {
+     tagString: string,
+     chunks: Chunk[],
+   ) {
+-    await new Promise<void>((resolve, reject) => {
+-      db.db.serialize(() => {
+-        db.db.exec("BEGIN", (err: Error | null) => {
+-          if (err) {
+-            reject(new Error("error creating transaction", { cause: err }));
+-          }
+-        });
+-        const chunksSQL =
+-          "INSERT INTO chunks (cacheKey, path, idx, startLine, endLine, content) VALUES (?, ?, ?, ?, ?, ?)";
+-        chunks.map((c) => {
+-          db.db.run(
+-            chunksSQL,
+-            [c.digest, c.filepath, c.index, c.startLine, c.endLine, c.content],
+-            (result: RunResult, err: Error) => {
+-              if (err) {
+-                reject(
+-                  new Error("error inserting into chunks table", {
+-                    cause: err,
+-                  }),
+-                );
+-              }
+-            },
+-          );
+-          const chunkTagsSQL =
+-            "INSERT INTO chunk_tags (chunkId, tag) VALUES (last_insert_rowid(), ?)";
+-          db.db.run(
+-            chunkTagsSQL,
+-            [tagString],
+-            (result: RunResult, err: Error) => {
+-              if (err) {
+-                reject(
+-                  new Error("error inserting into chunk_tags table", {
+-                    cause: err,
+-                  }),
+-                );
+-              }
+-            },
+-          );
+-        });
+-        db.db.exec("COMMIT", (err: Error | null) => {
+-          if (err) {
+-            reject(
+-              new Error("error while committing insert chunks transaction", {
+-                cause: err,
+-              }),
+-            );
+-          } else {
+-            resolve();
+-          }
+-        });
+-      });
+-    });
++    const chunksSQL =
++      "INSERT INTO chunks (cacheKey, path, idx, startLine, endLine, content) VALUES (?, ?, ?, ?, ?, ?)";
++    const chunkTagsSQL =
++      "INSERT INTO chunk_tags (chunkId, tag) VALUES (last_insert_rowid(), ?)";
++    await db.exec("BEGIN");
++    try {
++      for (const c of chunks) {
++        await db.run(chunksSQL, [
++          c.digest,
++          c.filepath,
++          c.index,
++          c.startLine,
++          c.endLine,
++          c.content,
++        ]);
++        await db.run(chunkTagsSQL, [tagString]);
++      }
++      await db.exec("COMMIT");
++    } catch (error) {
++      await db.exec("ROLLBACK");
++      throw new Error("error inserting into chunks table", { cause: error });
++    }
+   }
+ }
+diff --git a/core/indexing/docs/DocsService.ts b/core/indexing/docs/DocsService.ts
+index e9772933e..3d5b3273e 100644
+--- a/core/indexing/docs/DocsService.ts
++++ b/core/indexing/docs/DocsService.ts
+@@ -1,6 +1,8 @@
+ import { ConfigResult } from "@continuedev/config-yaml";
+-import { open, type Database } from "sqlite";
+-import sqlite3 from "sqlite3";
++import {
++  openDatabase,
++  type SqliteDatabaseLike,
++} from "../../util/sqliteBackend.js";
+ 
+ import {
+   Chunk,
+@@ -178,7 +180,7 @@ export default class DocsService {
+   private lanceTableNamesSet = new Set<string>();
+ 
+   private config!: ContinueConfig;
+-  private sqliteDb?: Database;
++  private sqliteDb?: SqliteDatabaseLike;
+ 
+   private ideInfoPromise: Promise<IdeInfo>;
+   private githubToken?: string;
+@@ -877,9 +879,8 @@ export default class DocsService {
+   // SQLITE DB
+   private async getOrCreateSqliteDb() {
+     if (!this.sqliteDb) {
+-      const db = await open({
++      const db = await openDatabase({
+         filename: getDocsSqlitePath(),
+-        driver: sqlite3.Database,
+       });
+ 
+       await db.exec("PRAGMA busy_timeout = 3000;");
+diff --git a/core/indexing/docs/migrations.ts b/core/indexing/docs/migrations.ts
+index dc8879c67..749219b7c 100644
+--- a/core/indexing/docs/migrations.ts
++++ b/core/indexing/docs/migrations.ts
+@@ -1,4 +1,4 @@
+-import { type Database } from "sqlite";
++import { type SqliteDatabaseLike } from "../../util/sqliteBackend.js";
+ import { type Table } from "vectordb";
+ 
+ import { editConfigFile, migrate } from "../../util/paths.js";
+@@ -25,7 +25,7 @@ export async function runLanceMigrations(table: Table) {
+   });
+ }
+ 
+-export async function runSqliteMigrations(db: Database) {
++export async function runSqliteMigrations(db: SqliteDatabaseLike) {
+   await new Promise((resolve) => {
+     void migrate(
+       "sqlite_modify_docs_columns_and_copy_to_config",
+diff --git a/core/indexing/refreshIndex.ts b/core/indexing/refreshIndex.ts
+index 42c4f0c8d..0723b418e 100644
+--- a/core/indexing/refreshIndex.ts
++++ b/core/indexing/refreshIndex.ts
+@@ -2,8 +2,10 @@ import crypto from "node:crypto";
+ import * as fs from "node:fs";
+ 
+ import plimit from "p-limit";
+-import { open, type Database } from "sqlite";
+-import sqlite3 from "sqlite3";
++import {
++  openDatabase,
++  type SqliteDatabaseLike,
++} from "../util/sqliteBackend.js";
+ 
+ import { FileStatsMap, IndexTag, IndexingProgressUpdate } from "../index.js";
+ import { getIndexSqlitePath } from "../util/paths.js";
+@@ -16,7 +18,7 @@ import {
+   RefreshIndexResults,
+ } from "./types.js";
+ 
+-export type DatabaseConnection = Database<sqlite3.Database>;
++export type DatabaseConnection = SqliteDatabaseLike;
+ 
+ export class SqliteDb {
+   static db: DatabaseConnection | null = null;
+@@ -95,9 +97,8 @@ export class SqliteDb {
+     }
+ 
+     SqliteDb.indexSqlitePath = getIndexSqlitePath();
+-    SqliteDb.db = await open({
++    SqliteDb.db = await openDatabase({
+       filename: SqliteDb.indexSqlitePath,
+-      driver: sqlite3.Database,
+     });
+ 
+     await SqliteDb.db.exec("PRAGMA busy_timeout = 3000;");
+diff --git a/core/package.json b/core/package.json
+index b8441cc33..176f6ef02 100644
+--- a/core/package.json
++++ b/core/package.json
+@@ -109,8 +109,6 @@
+     "replicate": "^0.26.0",
+     "shell-quote": "^1.8.3",
+     "socket.io-client": "^4.7.3",
+-    "sqlite": "^5.1.1",
+-    "sqlite3": "^5.1.7",
+     "system-ca": "^1.0.3",
+     "tar": "^7.5.13",
+     "tree-sitter-wasms": "^0.1.11",
+@@ -123,7 +121,8 @@
+     "winston": "^3.17.0",
+     "workerpool": "^9.1.3",
+     "yaml": "^2.4.2",
+-    "zod": "^3.25.76"
++    "zod": "^3.25.76",
++    "node-sqlite3-wasm": "0.8.61"
+   },
+   "engine-strict": true,
+   "engines": {
+@@ -131,5 +130,9 @@
+   },
+   "overrides": {
+     "tar": "^7.5.13"
++  },
++  "optionalDependencies": {
++    "sqlite3": "^5.1.7",
++    "sqlite": "^5.1.1"
+   }
+ }
+diff --git a/core/util/sqliteBackend.test.ts b/core/util/sqliteBackend.test.ts
+new file mode 100644
+index 000000000..4f36d829b
+--- /dev/null
++++ b/core/util/sqliteBackend.test.ts
+@@ -0,0 +1,93 @@
++/**
++ * Tests for the unified SQLite backend: both the native path (when the
++ * binding is available) and the WASM fallback must expose the same surface.
++ */
++
++import * as fs from "node:fs";
++import * as os from "node:os";
++import * as path from "node:path";
++
++import { openDatabase } from "./sqliteBackend.js";
++
++function makeTempDbPath(): string {
++  return path.join(
++    fs.mkdtempSync(path.join(os.tmpdir(), "sqlite-backend-test-")),
++    "test.db",
++  );
++}
++
++describe.each([
++  ["native", { forceWasm: false }],
++  ["wasm", { forceWasm: true }],
++])("openDatabase (%s backend)", (_name, extraOptions) => {
++  it("runs the full run / get / all / exec / prepare surface", async () => {
++    const db = await openDatabase({
++      filename: makeTempDbPath(),
++      ...extraOptions,
++    });
++
++    await db.exec("CREATE TABLE items (id INTEGER PRIMARY KEY, name TEXT)");
++    const insert = await db.run("INSERT INTO items (name) VALUES (?)", "alpha");
++    expect(insert.changes).toBe(1);
++    expect(insert.lastID ?? insert.lastInsertRowid).toBeTruthy();
++
++    await db.run("INSERT INTO items (name) VALUES (?)", "beta");
++
++    const all = await db.all<{ id: number; name: string }[]>(
++      "SELECT id, name FROM items ORDER BY id",
++    );
++    expect(all).toHaveLength(2);
++    expect(all[0].name).toBe("alpha");
++
++    const one = await db.get<{ name: string }>(
++      "SELECT name FROM items WHERE name = ?",
++      "beta",
++    );
++    expect(one?.name).toBe("beta");
++
++    // Variadic positional binding (sqlite package style)
++    const variadic = await db.all(
++      "SELECT name FROM items WHERE name = ? AND id > ?",
++      "alpha",
++      0,
++    );
++    expect(variadic).toHaveLength(1);
++
++    // prepare + statement with binds at query time
++    const stmt = await db.prepare("SELECT name FROM items WHERE name = ?");
++    const stmtRows = await stmt.all("alpha");
++    fs.writeFileSync("/tmp/stmt-rows-debug.json", JSON.stringify(stmtRows));
++    expect(stmtRows.length).toBe(1);
++    expect(await stmt.get("beta")).toMatchObject({ name: "beta" });
++
++    // Named parameters (object binding)
++    const named = await db.all("SELECT name FROM items WHERE name = :name", {
++      ":name": "alpha",
++    });
++    expect(named).toHaveLength(1);
++
++    // lastID alias normalization on run results
++    // NOTE: the native `sqlite` package may return the raw driver result
++    // (lastID only) depending on the driver; both keys are normalized.
++    const withId = await db.run("INSERT INTO items (name) VALUES (?)", "gamma");
++    expect(withId.lastID).toBe(3);
++    expect(Number(withId.lastInsertRowid ?? withId.lastID)).toBe(3);
++
++    await db.close();
++  });
++
++  it("supports transactions and PRAGMAs", async () => {
++    const db = await openDatabase({
++      filename: makeTempDbPath(),
++      ...extraOptions,
++    });
++
++    await db.exec("PRAGMA busy_timeout = 3000;");
++    await db.exec("CREATE TABLE t (v TEXT)");
++    await db.exec("BEGIN");
++    await db.run("INSERT INTO t (v) VALUES (?)", "x");
++    await db.run("ROLLBACK");
++    const rows = await db.all("SELECT * FROM t");
++    expect(rows).toHaveLength(0);
++  });
++});
+diff --git a/core/util/sqliteBackend.ts b/core/util/sqliteBackend.ts
+new file mode 100644
+index 000000000..ef343a8ee
+--- /dev/null
++++ b/core/util/sqliteBackend.ts
+@@ -0,0 +1,191 @@
++/**
++ * Unified SQLite backend for core.
++ *
++ * Prefers the native `sqlite3` driver (faster) when its binding is available,
++ * and transparently falls back to `node-sqlite3-wasm` (pure WebAssembly,
++ * installed from the npm registry - no native binary, no GitHub download) when
++ * it is not. On corporate machines behind authenticating proxies this removes
++ * the last dependency on GitHub-hosted binaries.
++ *
++ * The returned object mirrors the promise-based API of the `sqlite` package
++ * for the subset core uses: run / get / all / exec / prepare / close, plus the
++ * raw-driver `lastID` property normalized onto run results (the WASM backend
++ * only exposes lastInsertRowid).
++ */
++
++export interface SqliteRunResult {
++  changes: number;
++  lastInsertRowid: number | bigint;
++  /** Alias of lastInsertRowid, kept for code written against the raw driver. */
++  lastID?: number | bigint;
++}
++
++export interface SqliteStatement {
++  all(...values: any[]): Promise<any[]>;
++  get(...values: any[]): Promise<any>;
++  run(...values: any[]): Promise<SqliteRunResult>;
++}
++
++export interface SqliteDatabaseLike {
++  /** Variadic like the sqlite package: (sql, objectParam) or (sql, p1, p2, ...). */
++  run(sql: string, ...values: any[]): Promise<SqliteRunResult>;
++  /** Same generic shape as the sqlite package: T is the FULL result type. */
++  all<T = any[]>(sql: string, ...values: any[]): Promise<T>;
++  get<T = any>(sql: string, ...values: any[]): Promise<T | undefined>;
++  exec(sql: string): Promise<void>;
++  prepare(sql: string, ...values: any[]): Promise<SqliteStatement>;
++  close(): Promise<void> | void;
++}
++
++export interface SqliteOpenOptions {
++  filename: string;
++  /** Fail instead of creating the file when it does not exist (default false). */
++  fileMustExist?: boolean;
++  /** Force the WASM backend even when the native binding is available. */
++  forceWasm?: boolean;
++}
++
++/** Resolve the native sqlite3 driver lazily; undefined when unavailable. */
++async function tryLoadNativeDriver(): Promise<any | undefined> {
++  try {
++    const mod = await import("sqlite3");
++    return (mod as any).default?.Database ?? (mod as any).Database;
++  } catch {
++    return undefined;
++  }
++}
++
++/**
++ * Opens a SQLite database with the same promise-based surface as the `sqlite`
++ * package, backed by the native driver when possible and by WASM otherwise.
++ */
++export async function openDatabase(
++  options: SqliteOpenOptions,
++): Promise<SqliteDatabaseLike> {
++  if (!options.forceWasm) {
++    try {
++      const driver = await tryLoadNativeDriver();
++      if (driver) {
++        const { open } = await import("sqlite");
++        const nativeDb = await (open as any)({
++          filename: options.filename,
++          driver,
++          fileMustExist: options.fileMustExist,
++        });
++        return new NativeSqliteDatabase(nativeDb);
++      }
++    } catch (error) {
++      // Fall through to the WASM backend - e.g. the native binding is missing
++      // (install scripts skipped behind corporate proxies).
++      const reason = error instanceof Error ? error.message : String(error);
++      console.info(
++        `[sqlite] Native binding unavailable (${reason.slice(0, 120)}) - using node-sqlite3-wasm fallback`,
++      );
++    }
++  }
++
++  const mod: any = await import("node-sqlite3-wasm");
++  const Database = mod.default?.Database ?? mod.Database;
++  const wasmDb = new Database(options.filename, {
++    fileMustExist: options.fileMustExist ?? false,
++  });
++  return new WasmSqliteDatabase(wasmDb);
++}
++
++/**
++ * Adapter over the native `sqlite` package database normalizing the run
++ * results (lastID) and the prepare-with-parameters usage.
++ */
++class NativeSqliteDatabase implements SqliteDatabaseLike {
++  constructor(private readonly nativeDb: any) {}
++
++  async run(sql: string, ...values: any[]): Promise<SqliteRunResult> {
++    const result = await this.nativeDb.run(sql, ...values);
++    return {
++      changes: result?.changes ?? 0,
++      lastInsertRowid: result?.lastInsertRowid ?? result?.lastID ?? 0,
++      lastID: result?.lastID ?? result?.lastInsertRowid ?? 0,
++    };
++  }
++
++  async all<T = any[]>(sql: string, ...values: any[]): Promise<T> {
++    return (await this.nativeDb.all(sql, ...values)) as T;
++  }
++
++  async get<T = any>(sql: string, ...values: any[]): Promise<T | undefined> {
++    return (await this.nativeDb.get(sql, ...values)) as T | undefined;
++  }
++
++  async exec(sql: string): Promise<void> {
++    return this.nativeDb.exec(sql);
++  }
++
++  async prepare(sql: string, ...values: any[]): Promise<SqliteStatement> {
++    return {
++      all: async (...binds: any[]) =>
++        this.all(sql, ...(binds.length ? binds : values)),
++      get: async (...binds: any[]) =>
++        this.get(sql, ...(binds.length ? binds : values)),
++      run: async (...binds: any[]) =>
++        this.run(sql, ...(binds.length ? binds : values)),
++    };
++  }
++
++  async close(): Promise<void> {
++    return this.nativeDb.close();
++  }
++}
++
++/**
++ * Adapter over node-sqlite3-wasm's synchronous API exposing the async surface
++ * of the `sqlite` package used throughout core.
++ */
++class WasmSqliteDatabase implements SqliteDatabaseLike {
++  constructor(private readonly wasmDb: any) {}
++
++  async run(sql: string, ...values: any[]): Promise<SqliteRunResult> {
++    const result = this.wasmDb.run(sql, normalizeBindValues(values));
++    return {
++      changes: result?.changes ?? 0,
++      lastInsertRowid: result?.lastInsertRowid ?? 0,
++      lastID: result?.lastInsertRowid ?? 0,
++    };
++  }
++
++  async all<T = any[]>(sql: string, ...values: any[]): Promise<T> {
++    return (await this.wasmDb.all(sql, normalizeBindValues(values))) as T;
++  }
++
++  async get<T = any>(sql: string, ...values: any[]): Promise<T | undefined> {
++    return (await this.wasmDb.get(sql, normalizeBindValues(values))) as
++      | T
++      | undefined;
++  }
++
++  async exec(sql: string): Promise<void> {
++    this.wasmDb.exec(sql);
++  }
++
++  async prepare(sql: string, ...values: any[]): Promise<SqliteStatement> {
++    return {
++      all: async (...binds: any[]) =>
++        this.all(sql, ...(binds.length ? binds : values)),
++      get: async (...binds: any[]) =>
++        this.get(sql, ...(binds.length ? binds : values)),
++      run: async (...binds: any[]) =>
++        this.run(sql, ...(binds.length ? binds : values)),
++    };
++  }
++
++  async close(): Promise<void> {
++    this.wasmDb.close();
++  }
++}
++
++/** node-sqlite3-wasm takes ONE bind value (object | array | scalar); the
++ * `sqlite` package API allows variadic scalars - normalize between the two. */
++function normalizeBindValues(values: any[]): any {
++  if (values.length === 0) return undefined;
++  if (values.length === 1) return values[0];
++  return values;
++}
+diff --git a/extensions/cli/build.mjs b/extensions/cli/build.mjs
+index b68829058..0b91279bb 100644
+--- a/extensions/cli/build.mjs
++++ b/extensions/cli/build.mjs
+@@ -16,6 +16,7 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
+ // Users should not need to install any additional dependencies
+ const external = [
+   "fsevents", // macOS native file watcher (optional dependency)
++  "node-sqlite3-wasm", // WASM sqlite loads its .wasm from its real module dir
+   "./xhr-sync-worker.js", // JSDOM worker file that needs to be copied separately
+ ];
+ 
+diff --git a/extensions/cli/package.json b/extensions/cli/package.json
+index 2ee1c82b0..e33995b78 100644
+--- a/extensions/cli/package.json
++++ b/extensions/cli/package.json
+@@ -48,7 +48,8 @@
+     "fdir": "^6.4.2",
+     "find-up": "^8.0.0",
+     "fzf": "^0.5.2",
+-    "js-yaml": "^4.1.1"
++    "js-yaml": "^4.1.1",
++    "node-sqlite3-wasm": "0.8.61"
+   },
+   "devDependencies": {
+     "@continuedev/config-yaml": "file:../../packages/config-yaml",
+diff --git a/extensions/vscode/package.json b/extensions/vscode/package.json
+index 0030d3ea5..f3647909b 100644
+--- a/extensions/vscode/package.json
++++ b/extensions/vscode/package.json
+@@ -723,7 +723,6 @@
+     "@continuedev/fetch": "file:../../packages/fetch",
+     "@electron/rebuild": "^4.0.3",
+     "@reduxjs/toolkit": "^1.9.3",
+-    "@vscode/ripgrep": "^1.15.9",
+     "axios": "^1.13.1",
+     "core": "file:../../core",
+     "cors": "^2.8.5",
+@@ -765,7 +764,8 @@
+     "vitest": "^3.1.4",
+     "vscode-languageclient": "^8.0.2",
+     "ws": "^8.19.0",
+-    "yarn": "^1.22.21"
++    "yarn": "^1.22.21",
++    "node-sqlite3-wasm": "0.8.61"
+   },
+   "overrides": {
+     "vitest": {
+diff --git a/extensions/vscode/scripts/esbuild.js b/extensions/vscode/scripts/esbuild.js
+index e800cdfc6..7de1b0226 100644
+--- a/extensions/vscode/scripts/esbuild.js
++++ b/extensions/vscode/scripts/esbuild.js
+@@ -10,7 +10,7 @@ const esbuildConfig = {
+   entryPoints: ["src/extension.ts"],
+   bundle: true,
+   outfile: "out/extension.js",
+-  external: ["vscode", "esbuild", "./xhr-sync-worker.js"],
++  external: ["vscode", "esbuild", "./xhr-sync-worker.js", "node-sqlite3-wasm"],
+   format: "cjs",
+   platform: "node",
+   sourcemap: flags.includes("--sourcemap"),
+diff --git a/extensions/vscode/scripts/prepackage.js b/extensions/vscode/scripts/prepackage.js
+index dff54eab6..46869246c 100644
+--- a/extensions/vscode/scripts/prepackage.js
++++ b/extensions/vscode/scripts/prepackage.js
+@@ -10,7 +10,6 @@ const {
+   autodetectPlatformAndArch,
+ } = require("../../../scripts/util/index");
+ 
+-const { copySqlite } = require("./download-copy-sqlite");
+ const { generateAndCopyConfigYamlSchema } = require("./generate-copy-config");
+ const { installAndCopyNodeModules } = require("./install-copy-nodemodule");
+ const { npmInstall } = require("./npm-install");
+@@ -335,48 +334,8 @@ void (async () => {
+     );
+   }
+ 
+-  if (!skipInstalls) {
+-    await copySqlite(target);
+-  } else {
+-    console.log("[info] Skipping sqlite download because SKIP_INSTALLS=true");
+-  }
+-
+-  console.log("[info] Copying sqlite node binding from core");
+-  await new Promise((resolve, reject) => {
+-    ncp(
+-      path.join(__dirname, "../../../core/node_modules/sqlite3/build"),
+-      path.join(__dirname, "../out/build"),
+-      { dereference: true },
+-      (error) => {
+-        if (error) {
+-          console.warn("[error] Error copying sqlite3 files", error);
+-          reject(error);
+-        } else {
+-          resolve();
+-        }
+-      },
+-    );
+-  });
+-
+-  // Copied here as well for the VS Code test suite
+-  await new Promise((resolve, reject) => {
+-    ncp(
+-      path.join(__dirname, "../../../core/node_modules/sqlite3/build"),
+-      path.join(__dirname, "../out"),
+-      { dereference: true },
+-      (error) => {
+-        if (error) {
+-          console.warn("[error] Error copying sqlite3 files", error);
+-          reject(error);
+-        } else {
+-          resolve();
+-        }
+-      },
+-    );
+-  });
+-
+   // Copy node_modules for pre-built binaries
+-  const NODE_MODULES_TO_COPY = ["@lancedb", "@vscode/ripgrep", "workerpool"];
++  const NODE_MODULES_TO_COPY = ["@lancedb", "node-sqlite3-wasm", "workerpool"];
+ 
+   fs.mkdirSync("out/node_modules", { recursive: true });
+ 
+@@ -474,20 +433,14 @@ void (async () => {
+     "models/all-MiniLM-L6-v2/vocab.txt",
+     "models/all-MiniLM-L6-v2/onnx/model_quantized.onnx",
+ 
+-    // node_modules (it's a bit confusing why this is necessary)
+-    `node_modules/@vscode/ripgrep/bin/rg${exe}`,
+-
+     // out directory (where the extension.js lives)
+     // "out/extension.js", This is generated afterward by vsce
+     // web-tree-sitter
+     "out/tree-sitter.wasm",
+     // Worker required by jsdom
+     "out/xhr-sync-worker.js",
+-    // SQLite3 Node native module
+-    "out/build/Release/node_sqlite3.node",
+-
+     // out/node_modules (to be accessed by extension.js)
+-    `out/node_modules/@vscode/ripgrep/bin/rg${exe}`,
++    `out/node_modules/node-sqlite3-wasm/dist/node-sqlite3-wasm.wasm`,
+     `out/node_modules/@lancedb/vectordb-${target}${isWinTarget ? "-msvc" : ""}${isLinuxTarget ? "-gnu" : ""}/index.node`,
+   ]);
+ 
+diff --git a/extensions/vscode/src/VsCodeIde.ts b/extensions/vscode/src/VsCodeIde.ts
+index 9770d3188..64d71d017 100644
+--- a/extensions/vscode/src/VsCodeIde.ts
++++ b/extensions/vscode/src/VsCodeIde.ts
+@@ -1,9 +1,9 @@
+-import * as child_process from "node:child_process";
+ import { exec } from "node:child_process";
+ 
+ import { Range } from "core";
+ import { EXTENSION_NAME } from "core/util/constants";
+ import { DEFAULT_IGNORES, defaultIgnoresGlob } from "core/indexing/ignore";
++import { listFilesNative, searchNative } from "./util/nativeSearch.js";
+ import * as URI from "uri-js";
+ import * as vscode from "vscode";
+ 
+@@ -441,38 +441,6 @@ class VsCodeIde implements IDE {
+       .map((t) => (t.input as vscode.TabInputText).uri.toString());
+   }
+ 
+-  runRipgrepQuery(dirUri: string, args: string[]) {
+-    const relativeDir = vscode.Uri.parse(dirUri).fsPath;
+-    const ripGrepUri = vscode.Uri.joinPath(
+-      getExtensionUri(),
+-      "out/node_modules/@vscode/ripgrep/bin/rg",
+-    );
+-    const p = child_process.spawn(ripGrepUri.fsPath, args, {
+-      cwd: relativeDir,
+-    });
+-    let output = "";
+-
+-    p.stdout.on("data", (data) => {
+-      output += data.toString();
+-    });
+-
+-    return new Promise<string>((resolve, reject) => {
+-      p.on("error", reject);
+-      p.on("close", (code) => {
+-        if (code === 0) {
+-          resolve(output);
+-        } else if (code === 1) {
+-          // No matches
+-          resolve(
+-            "No matches found. Build, secrets, etc. dirs and files are not included.",
+-          );
+-        } else {
+-          reject(new Error(`Process exited with code ${code}`));
+-        }
+-      });
+-    });
+-  }
+-
+   async getFileResults(
+     pattern: string,
+     maxResults?: number,
+@@ -555,20 +523,12 @@ class VsCodeIde implements IDE {
+       return results.map((result) => vscode.workspace.asRelativePath(result));
+     } else {
+       const results: string[] = [];
+-      // Create a single combined ignore pattern using glob brace expansion
+       for (const dir of await this.getWorkspaceDirs()) {
+-        const dirResults = await this.runRipgrepQuery(dir, [
+-          "--files",
+-          "--iglob",
++        const dirResults = listFilesNative(
++          vscode.Uri.parse(dir).fsPath,
+           pattern,
+-          "--ignore-file",
+-          ".continueignore",
+-          "--ignore-file",
+-          ".gitignore",
+-          "--glob",
+-          defaultIgnoresGlob,
+-          ...(maxResults ? ["--max-count", String(maxResults)] : []),
+-        ]);
++          maxResults,
++        );
+ 
+         results.push(dirResults);
+       }
+@@ -586,28 +546,16 @@ class VsCodeIde implements IDE {
+ 
+   async getSearchResults(query: string, maxResults?: number): Promise<string> {
+     if (vscode.env.remoteName) {
+-      throw new Error("Ripgrep not supported, this workspace is remote");
++      throw new Error("Search not supported, this workspace is remote");
+     }
+     const results: string[] = [];
+ 
+     for (const dir of await this.getWorkspaceDirs()) {
+-      const dirResults = await this.runRipgrepQuery(dir, [
+-        "-i", // Case-insensitive search
+-        "--ignore-file",
+-        ".continueignore",
+-        "--ignore-file",
+-        ".gitignore",
+-        "-C",
+-        "2", // Show 2 lines of context
+-        "--heading", // Only show filepath once per result
+-        // Use a single glob with all default ignores
+-        "--glob",
+-        defaultIgnoresGlob,
+-        ...(maxResults ? ["-m", maxResults.toString()] : []),
+-        "-e",
+-        query, // Pattern to search for
+-        ".", // Directory to search in
+-      ]);
++      const dirResults = searchNative(
++        vscode.Uri.parse(dir).fsPath,
++        query,
++        maxResults,
++      );
+ 
+       results.push(dirResults);
+     }
+diff --git a/extensions/vscode/src/util/nativeSearch.ts b/extensions/vscode/src/util/nativeSearch.ts
+new file mode 100644
+index 000000000..9103af8d5
+--- /dev/null
++++ b/extensions/vscode/src/util/nativeSearch.ts
+@@ -0,0 +1,287 @@
++/**
++ * Built-in Node search replacing the ripgrep binary dependency.
++ *
++ * Produces the same output shape as `rg --heading --color never -C 2`:
++ * blocks of `./relative/path` followed by (line: content) matches with up to
++ * `contextLines` lines of context, separated by `--` between match groups.
++ *
++ * Uses the same ignore rules as the rest of the codebase: DEFAULT_IGNORES
++ * directories plus `.gitignore`/`.continueignore` files.
++ */
++
++import * as fs from "node:fs";
++import * as path from "node:path";
++
++import { DEFAULT_IGNORES } from "core/indexing/ignore";
++
++const DEFAULT_CONTEXT_LINES = 2;
++const DEFAULT_MAX_FILE_BYTES = 2 * 1024 * 1024; // 2 MB per file
++const BINARY_SNIFF_BYTES = 1024;
++
++/** Directories never traversed (from DEFAULT_IGNORES + structural dirs). */
++const SKIP_DIRS = new Set(
++  DEFAULT_IGNORES.map((entry: string) =>
++    entry.replace(/^\*\*\//, "").replace(/\/\*\*$/, ""),
++  )
++    .concat([
++      "node_modules",
++      ".git",
++      ".continue",
++      ".vscode",
++      "build",
++      "dist",
++      "out",
++      "venv",
++      ".venv",
++    ])
++    .map((entry: string) => entry.toLowerCase()),
++);
++
++interface IgnoreRules {
++  /** Returns true when a RELATIVE path (posix separators) should be skipped. */
++  isIgnored: (relPath: string) => boolean;
++}
++
++function loadIgnoreFile(dir: string, fileName: string, rules: string[]): void {
++  const ignorePath = path.join(dir, fileName);
++  try {
++    if (!fs.existsSync(ignorePath)) return;
++    const content = fs.readFileSync(ignorePath, "utf8");
++    for (const rawLine of content.split("\n")) {
++      const line = rawLine.trim();
++      if (!line || line.startsWith("#") || line.startsWith("!")) continue;
++      rules.push(line.replace(/\\/g, "/").replace(/\/$/, ""));
++    }
++  } catch {
++    // Unreadable ignore file - ignore it
++  }
++}
++
++function loadIgnoreRules(dir: string): IgnoreRules {
++  const rules: string[] = [];
++  loadIgnoreFile(dir, ".gitignore", rules);
++  loadIgnoreFile(dir, ".continueignore", rules);
++
++  const patterns = rules.map((rule) => {
++    // Minimal gitignore-style matching: leading/trailing slashes and * wildcards
++    let prefix = "";
++    let body = rule;
++    if (body.startsWith("/")) {
++      prefix = "^";
++      body = body.slice(1);
++    } else {
++      prefix = "(^|/)";
++    }
++    const escaped = body
++      .replace(/[.+^${}()|[\]\\]/g, "\\$&")
++      .replace(/\*\*\//g, "(.*/)?")
++      .replace(/\*\*/g, ".*")
++      .replace(/\*/g, "[^/]*")
++      .replace(/\?/g, "[^/]");
++    return { regexp: new RegExp(`${prefix}${escaped}(/.*)?$`), rule };
++  });
++
++  return {
++    isIgnored: (relPath: string) => {
++      const posix = relPath.replace(/\\/g, "/");
++      return patterns.some(({ regexp }) => regexp.test(posix));
++    },
++  };
++}
++
++function isProbablyBinary(buffer: Buffer): boolean {
++  const sample = buffer.subarray(
++    0,
++    Math.min(BINARY_SNIFF_BYTES, buffer.length),
++  );
++  return sample.includes(0);
++}
++
++interface WalkFile {
++  absPath: string;
++  relPath: string;
++}
++
++/** Iterative directory walk respecting the ignore rules. */
++function* walkFiles(
++  dir: string,
++  relBase: string,
++  rules: IgnoreRules,
++  maxDepth: number,
++): Generator<WalkFile> {
++  let entries: fs.Dirent[];
++  try {
++    entries = fs.readdirSync(dir, { withFileTypes: true });
++  } catch {
++    return;
++  }
++
++  for (const entry of entries) {
++    if (relBase.split("/").filter(Boolean).length >= maxDepth) {
++      return;
++    }
++    const name = entry.name;
++    const absPath = path.join(dir, name);
++    const relPath = relBase ? `${relBase}/${name}` : name;
++
++    if (entry.isDirectory()) {
++      if (SKIP_DIRS.has(name.toLowerCase()) || rules.isIgnored(`${relPath}/`)) {
++        continue;
++      }
++      yield* walkFiles(absPath, relPath, rules, maxDepth);
++    } else if (entry.isFile()) {
++      if (rules.isIgnored(relPath)) continue;
++      yield { absPath, relPath };
++    }
++  }
++}
++
++function globToRegExp(globPattern: string): RegExp {
++  const normalized = globPattern.replace(/^\.\//, "").replace(/\\/g, "/");
++  let source = "";
++  let i = 0;
++  while (i < normalized.length) {
++    const char = normalized[i];
++    if (char === "*") {
++      if (normalized[i + 1] === "*") {
++        // `**/` or `**`
++        if (normalized[i + 2] === "/") {
++          source += "(.*/)?";
++          i += 3;
++        } else {
++          source += ".*";
++          i += 2;
++        }
++      } else {
++        source += "[^/]*";
++        i += 1;
++      }
++    } else if (char === "?") {
++      source += "[^/]";
++      i += 1;
++    } else if (char === "{") {
++      // Alternate the simple `{a,b}` form
++      const closeIndex = normalized.indexOf("}", i);
++      const body = normalized.slice(i + 1, closeIndex);
++      source += `(${body
++        .split(",")
++        .map((part) => globToRegExp(part).source.replace(/^\^|\$$/g, ""))
++        .join("|")})`;
++      i = closeIndex + 1;
++    } else {
++      source += char.replace(/[.+^${}()|[\]\\]/g, "\\$&");
++      i += 1;
++    }
++  }
++  return new RegExp(`^${source}$`);
++}
++
++/** Search files under a directory; returns rg-shaped output. */
++export function searchNative(
++  dirFsPath: string,
++  query: string,
++  maxResults?: number,
++  contextLines: number = DEFAULT_CONTEXT_LINES,
++): string {
++  const rules = loadIgnoreRules(dirFsPath);
++  let regex: RegExp;
++  try {
++    regex = new RegExp(query, "i");
++  } catch {
++    // Fall back to a literal search for invalid regexes
++    regex = new RegExp(query.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "i");
++  }
++
++  const maxMatches = maxResults ?? 200;
++  let output = "";
++  let matchCount = 0;
++  let truncated = false;
++
++  for (const file of walkFiles(dirFsPath, "", rules, 20)) {
++    if (matchCount >= maxMatches) {
++      truncated = true;
++      break;
++    }
++
++    let stat: fs.Stats;
++    try {
++      stat = fs.statSync(file.absPath);
++    } catch {
++      continue;
++    }
++    if (stat.size > DEFAULT_MAX_FILE_BYTES) continue;
++
++    let content: Buffer;
++    try {
++      content = fs.readFileSync(file.absPath);
++    } catch {
++      continue;
++    }
++    if (isProbablyBinary(content)) continue;
++
++    const lines = content.toString("utf8").split("\n");
++    let fileHasMatches = false;
++    let printedLines: { num: number; text: string }[] = [];
++    let lastMatchNum = -Infinity;
++
++    for (let lineNum = 0; lineNum < lines.length; lineNum++) {
++      if (regex.test(lines[lineNum])) {
++        matchCount++;
++        fileHasMatches = true;
++        const start = Math.max(0, lineNum - contextLines);
++        const end = Math.min(lines.length - 1, lineNum + contextLines);
++        for (let n = start; n <= end; n++) {
++          if (!printedLines.some((p) => p.num === n)) {
++            printedLines.push({ num: n, text: lines[n] });
++          }
++        }
++        lastMatchNum = lineNum;
++        printedLines = printedLines.sort((a, b) => a.num - b.num);
++        void lastMatchNum;
++        if (matchCount >= maxMatches) {
++          truncated = true;
++          break;
++        }
++      }
++    }
++
++    if (fileHasMatches) {
++      if (output.length > 0) {
++        output += "\n";
++      }
++      output += `./${file.relPath}\n`;
++      output += `${printedLines.map((p) => `${p.num + 1}:${p.text}`).join("\n")}\n`;
++    }
++
++    if (truncated) break;
++  }
++
++  if (matchCount === 0) {
++    return "No matches found. Build, secrets, etc. dirs and files are not included.";
++  }
++
++  if (truncated) {
++    output = `Showing up to ${maxMatches} matches\n${output}`;
++  }
++  return output;
++}
++
++/** List files under a directory matching a glob pattern; returns rg --files-shaped output. */
++export function listFilesNative(
++  dirFsPath: string,
++  globPattern: string,
++  maxResults?: number,
++): string {
++  const rules = loadIgnoreRules(dirFsPath);
++  const globRegExp = globToRegExp(globPattern);
++
++  const results: string[] = [];
++  for (const file of walkFiles(dirFsPath, "", rules, 20)) {
++    if (maxResults && results.length >= maxResults) break;
++    if (globRegExp.test(file.relPath)) {
++      results.push(file.relPath);
++    }
++  }
++
++  return results.join("\n");
++}
+-- 
+2.53.0
+
