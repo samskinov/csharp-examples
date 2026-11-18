@@ -177,10 +177,29 @@ ont tous été rencontrés sur un poste corporate Windows.
 ### 6.2 Les quatre recettes rencontrées
 
 **a) 407 sur les headers Node (build VSIX)**
-```powershell
-$env:npm_config_nodedir = "C:\Program Files\nodejs"   # session
-npm config set nodedir "C:\Program Files\nodejs"       # persistant
-# variante miroir : $env:NODEJS_ORG_MIRROR = "http://mirror.corp/nodejs-dist"
+
+ATTENTION : ne PAS utiliser `nodedir` pointant vers l'installation Node binaire
+(MSI) - elle contient include\node\*.h mais PAS common.gypi (fichier du code
+source de Node) -> erreur "common.gypi not found" a la configuration.
+
+Recette recommandee - miroir local des headers (fichiers texte, passent
+generalement le filtre de contenu) :
+```cmd
+:: version exacte : node -v  (ex : v24.15.0)
+:: navigateur : https://nodejs.org/dist/v24.15.0/node-v24.15.0-headers.tar.gz
+:: layout : C:\nodejs-mirror\v24.15.0\node-v24.15.0-headers.tar.gz
+python -m http.server 8080 --directory C:\nodejs-mirror
+npm config delete nodedir
+set NODEJS_ORG_MIRROR=http://127.0.0.1:8080
+:: puis rebuild - node-gyp gere lui-meme l'extraction :
+npm rebuild sqlite3 --verbose
+```
+
+Variante - source Node complete comme nodedir (contient common.gypi) :
+```cmd
+:: navigateur : https://nodejs.org/dist/v24.15.0/node-v24.15.0.tar.gz
+tar -xzf node-v24.15.0.tar.gz -C C:\node-src
+npm config set nodedir "C:\node-src\node-v24.15.0"
 ```
 
 **b) sharp 0.33 : « Could not load sharp » + 407 sur fallback libvips**
