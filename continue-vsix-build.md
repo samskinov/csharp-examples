@@ -62,9 +62,10 @@ types de `core` via `core\index.d.ts`, qui a besoin des dépendances de core.
 node .\scripts\build-packages.js
 
 :: 2) core — OBLIGATOIRE avant gui
+::    --include=dev force les devDependencies (shiki, typescript, ...)
 ::    --ignore-scripts évite les téléchargements hors registry npm
 ::    (sharp/libvips et Chrome de puppeteer, inutiles au build) :
-cd core && npm install --ignore-scripts --no-audit --no-fund && npm run build && cd ..
+cd core && npm install --include=dev --ignore-scripts --no-audit --no-fund && npm run build && cd ..
 
 :: 3) gui et extensions : installation des dépendances
 cd gui && npm install --no-audit --no-fund && cd ..
@@ -114,6 +115,13 @@ npm link                           :: (optionnel) commande `cn` globale
   de `gui`, avec des chemins `..\core\...` : les dépendances de `core` ne sont
   pas installées. Refaire l'étape 2 (`cd core && npm install ...`). C'est le
   symptôme typique d'un `git clean -xfd` suivi de `build-packages.js` seul.
+- **« Cannot find module 'shiki' »** dans `core` : `shiki` est une
+  devDependency de core, importée par `core/codeRenderer/CodeRenderer.ts` et
+  `core/nextEdit/diff/diff.ts` — tsc les compile même s'ils ne sont pas
+  utilisés au runtime. Si elle manque, l'install de core n'a pas abouti ou les
+  devDependencies ont été omises (`NODE_ENV=production`, `--omit=dev`).
+  Relancer `npm install --include=dev --ignore-scripts` puis vérifier
+  `dir node_modules\shiki`.
 - Le `--ignore-scripts` de l'étape 2 évite deux téléchargements hors registry
   npm faits par des dépendances de `core` : le libvips de `sharp` (GitHub) et
   le Chrome de `puppeteer` (Google). Ils ne servent pas au build : le code
