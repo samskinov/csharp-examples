@@ -1,11 +1,12 @@
 # Installer / compiler Continue (VS Code + CLI) avec les patchs
 
-Ce repo fournit **4 patchs** à appliquer sur `continuedev/continue` (v2.1.0 ou
+Ce repo fournit **5 patchs** à appliquer sur `continuedev/continue` (v2.1.0 ou
 main) qui suppriment les dépendances aux binaires natifs (SQLite natif,
-ripgrep) et rendent le build reproductible depuis le registry npm seul — pensés
-pour les postes derrière un proxy d'entreprise.
+ripgrep), rendent le build reproductible depuis le registry npm seul et
+corrigent l'activation Windows — pensés pour les postes derrière un proxy
+d'entreprise.
 
-## Les 4 patchs (dans cet ordre)
+## Les 5 patchs (dans cet ordre)
 
 | Ordre | Fichier | Contenu |
 |---|---|---|
@@ -13,9 +14,11 @@ pour les postes derrière un proxy d'entreprise.
 | 2 | `continue-cli-modes.patch` | 4 commits : CLI chat/plan/agent + tools text, streaming live, perf GUI |
 | 3 | `continue-fallbacks.patch` | 1 commit : SQLite WASM (plus de binding natif), `dbinfoz`/`@database` retiré, recherche intégrée (plus de ripgrep), prepackage adapté |
 | 4 | `continue-cli-tools.patch` | 6 commits : chat sans tools natifs, un seul system message en tête, `/tool-mode` visible, réparation des tool calls XML (`</arg_value>`, `file_path`) côté CLI et VS Code, fallback XML en mode texte, VSIX limité au binaire LanceDB de la cible |
+| 5 | `continue-vscode-activation.patch` | 1 commit : logs d'activation visibles, `system-ca` chargé dynamiquement, binding `win-ca` correctement embarqué/copié |
 
-⚠️ Vérification faite : empilement `git am` 14+4+1+6 = **25 commits** sur `main`
-propre. Version de référence : `v2.1.0-vscode` (tag) ou `main` (état final).
+⚠️ Vérification faite : empilement `git am` 14+4+1+6+1 = **26 commits** sur
+`main` propre. Version de référence : `v2.1.0-vscode` (tag) ou `main` (état
+final).
 
 ## 1. Clone + patchs
 
@@ -24,12 +27,13 @@ git clone https://github.com/continuedev/continue continue
 cd continue
 git checkout main
 
-:: télécharger les 4 patchs depuis ce repo (navigateur OK) :
+:: télécharger les 5 patchs depuis ce repo (navigateur OK) :
 ::   raw.githubusercontent.com/samskinov/csharp-examples/main/<fichier>.patch
 git am continue-improvements.patch
 git am continue-cli-modes.patch
 git am continue-fallbacks.patch
 git am continue-cli-tools.patch
+git am continue-vscode-activation.patch
 :: (secours si git am échoue : git apply -3 <fichier>)
 ```
 
@@ -150,6 +154,41 @@ cd ..\..
 code --install-extension extensions\vscode\build\continue-<version>.vsix
 ```
 
+Le VSIX embarque `config-yaml-schema.json` et les schémas : **aucune
+compilation supplémentaire de la config n'est nécessaire**. Si VS Code affiche
+`Unable to write to User Settings because yaml.schemas is not a registered
+configuration`, c'est seulement l'extension YAML (redhat.vscode-yaml) qui n'est
+pas installée ; Continue continue de s'activer normalement.
+
+### Voir l'erreur d'activation (Windows)
+
+Le bouton « View Logs » de l'ancien VSIX ne faisait rien : il appelait
+`continue.viewLogs`, une commande enregistrée seulement après une activation
+réussie. Avec le patch #5 :
+
+1. Le message d'erreur affiche maintenant le texte réel.
+2. Un canal **Continue Activation** contient la stack complète.
+3. Le fichier `%USERPROFILE%\.continue\logs\activation-error.log` est écrit.
+
+Pour voir l'erreur dans VS Code, quelle que soit la version :
+
+```text
+Ctrl+Shift+P → Developer: Show Logs... → Extension Host
+```
+
+ou :
+
+```text
+Help → Toggle Developer Tools → Console (chercher "Continue")
+```
+
+ou : `Ctrl+Shift+P` → `Developer: Open Extension Logs Folder`, puis ouvrir
+`exthost.log` / `window1\exthost\exthost.log` et chercher `Continue`.
+Le log « Continue » de la barre latérale n'est pas le log d'activation.
+
+Un VSIX Windows x64 déjà compilé avec ces correctifs est disponible ici :
+`github.com/samskinov/csharp-examples/releases/tag/continue-vscode-1.3.40-win32`.
+
 ## 4. Build du CLI (`cn`)
 
 ```cmd
@@ -208,9 +247,10 @@ autoriser un précis, ou `--auto`.
   cd extensions\vscode && npm ci --no-audit --no-fund
   npm run prepackage -- --target win32-x64 && npm run package -- --target win32-x64
   ```
-  Si le patch #4 a déjà été appliqué par-dessus l'ancien #3, remplacez
-  `HEAD^` par `HEAD~2`, puis réappliquez `continue-fallbacks.patch` **et**
-  `continue-cli-tools.patch` dans cet ordre.
+  Si le patch #4 et/ou #5 ont déjà été appliqués par-dessus l'ancien #3,
+  remplacez `HEAD^` par `HEAD~2` (patch #4) ou `HEAD~3` (patch #4 + #5), puis
+  réappliquez `continue-fallbacks.patch`, `continue-cli-tools.patch` et
+  `continue-vscode-activation.patch` dans cet ordre.
 
 - **Node 24** validé de bout en bout (v24.22.3) : `engines` >= 20.20.1 ✓.
 - Le **tag nommé `main`** du repo rend `main..branche` ambigu : utiliser
