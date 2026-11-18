@@ -356,77 +356,67 @@ npm run prepackage -- --target win32-x64
 npm run package -- --target win32-x64
 ```
 
-### 6.5quater **Build VSIX sur poste verrouillé** (browser refuse les binaires)
+### 6.5quater **LA séquence définitive avec `--ignore-scripts`** (CLI + VSIX)
 
-Si le navigateur/proxy refuse les archives à binaires : l'astuce universelle est
-`npm install --ignore-scripts` — complète l'arbre **sans exécuter les scripts**
-de download. Les seuls fichiers à transférer ensuite via un canal interne
-(Teams/SharePoint ; renommer `.node`/`.exe` en `.txt` si la DLP s'en mêle) :
-
-| Fichier | Source (machine avec internet) | Destination (poste de build) |
-|---|---|---|
-| `node_sqlite3.node` | `npm i sqlite3@5.1.7` → `node_modules\sqlite3\build\Release\` | **UN SEUL fichier pour tout** : `core\node_modules\sqlite3\build\Release\` — le prepackage VSIX le copie de là |
-| `rg.exe` | `npm i @vscode/ripgrep@1.15.9` → `node_modules\@vscode\ripgrep\bin\` | `extensions\vscode\node_modules\@vscode\ripgrep\bin\rg.exe` (outils de recherche) |
-| `esbuild.exe` | `https://continue-server-binaries.s3.us-west-1.amazonaws.com/win32-x64/esbuild.zip` (S3 — **souvent autorisé**, tester) → extraire | `extensions\vscode\node_modules\@esbuild\` |
-
-Checklist ordonnée (après `npm install --ignore-scripts`) :
+**Verdict : ça passe.** Les builds (CLI + VSIX) aboutissent sans aucun
+download binaire ; à l'exécution tout fonctionne **sauf** : la recherche FTS
+`@codebase` (binding sqlite3), la recherche de fichiers (`rg.exe`) et la
+compilation de `config.ts` custom (`esbuild.exe`) — dégradations propres.
 
 ```cmd
-:: ===== A. Builds locaux (aucun download) =====
+:: ===== 1. Packages internes (aucun natif - installs normales) =====
+cd packages\config-types && npm install && npm run build && cd ..\..
+cd packages\terminal-security && npm install && npm run build && cd ..\..
+cd packages\llm-info && npm install && npm run build && cd ..\..
+cd packages\config-yaml && npm install && npm run build && cd ..\..
+cd packages\fetch && npm install && npm run build && cd ..\..
+cd packages\openai-adapters && npm install && npm run build && cd ..\..
+
+:: ===== 2. core - IGNORE-SCRIPTS (sqlite3/libvips skippés) =====
 cd core
 npm install --ignore-scripts
-npm run build                          :: tsc → dist
-cd ..\gui
-npm install
-npm run build                          :: tsc + vite → gui\dist
-cd ..\extensions\cli
-npm install --no-audit --no-fund --prefer-offline
-npm run build                          :: → dist\cn.js
-node dist\cn.js --help                 :: vérif (flags --mode / --tool-mode)
+npm run build                       :: tsc - dist\
+cd ..\..
 
-:: ===== B. VSIX =====
-cd ..\vscode
+:: ===== 3. CLI =====
+cd extensions\cli
 npm install --ignore-scripts
+npm run build                       :: -> dist\cn.js
+node dist\cn.js --help              :: vérif : flags --mode / --tool-mode
+cd ..\..
 
-:: 1) schéma config-yaml (local, aucun download binaire) :
-cd ..\..\packages\config-yaml
+:: ===== 4. GUI =====
+cd gui
 npm install
+npm run build                       :: tsc + vite -> gui\dist
+cd ..\..
+
+:: ===== 5. schéma config-yaml (pas dans git, à générer une fois) =====
+cd packages\config-yaml
 npm run generate-schema
+cd ..\..
 
-:: 2) binding sqlite3 OBLIGATOIRE pour prepackage (il copie depuis core) :
-::    copier le tarball dans core\node_modules\sqlite3\ puis :
-cd ..\..\core\node_modules\sqlite3
-tar -xvzf sqlite3-v5.1.7-napi-v6-win32-x64.tar.gz
-::    → build\Release\node_sqlite3.node
-
-:: 3) (optionnel) esbuild embarqué - S3, souvent autorisé :
-::    browser → https://continue-server-binaries.s3.us-west-1.amazonaws.com/win32-x64/esbuild.zip
-::    → extensions\vscode\node_modules\@esbuild\ puis Expand-Archive
-::    sans lui : seul le runtime de config.ts custom se dégrade
-
-:: 4) build VSIX sans aucun download :
-cd ..\..\extensions\vscode
+:: ===== 6. VSIX =====
+cd extensions\vscode
+npm install --ignore-scripts
+:: dossier de binding sqlite3 - VIDE acceptable (le prepackage passe ; FTS dégradée) :
+mkdir ..\..\core\node_modules\sqlite3\build\Release
 set SKIP_INSTALLS=true
 npm run prepackage -- --target win32-x64
 npm run package -- --target win32-x64
-::    → build\continue-<version>.vsix
+:: -> build\continue-<version>.vsix
 ```
 
-Prérequis de la séquence :
+**Optionnel pour compléter plus tard** (transfert interne, renommer .txt si DLP) :
 
-| Étape | Prérequis | Dégradation si absent |
+| Fichier | Où le placer | Ce que ça débloque |
 |---|---|---|
-| core/cli/gui `npm run build` | `npm install` (tsc ✓) | - |
-| schema `generate-schema` | deps de config-yaml | autocomplétion config.yaml perdue |
-| **binding sqlite3 extrait** | tarball transféré/obtenu | **prepackage échoue** (il copie depuis core) |
-| esbuild embarqué | zip S3 via browser | config.ts custom non compilable à l'exécution |
+| `node_sqlite3.node` | `core\node_modules\sqlite3\build\Release\` | FTS / `@codebase` |
+| `rg.exe` | `extensions\vscode\node_modules\@vscode\ripgrep\bin\` | recherche de fichiers |
+| `esbuild.exe` | `extensions\vscode\node_modules\@esbuild\` | config.ts custom à l'exécution |
+| tarball libvips dans `C:\sharp-dist\v8.14.5\` | (déjà dans votre .npmrc) | embeddings d'images |
 
-Notes :
-- N-API : `node_sqlite3.node` fonctionne sur toute version de Node (24 ✓) — un
-  seul fichier à transporter.
-- Sans `rg.exe`, l'extension démarre et les outils `search_code`/`file search`
-  se dégradent seuls ; sans le binding sqlite3, seule la recherche FTS
-  (`@codebase`) est absente — le reste de l'extension fonctionne.
+⚠️ Ne refaites **jamais `npm ci`** après les placements (`npm install` les préserve).
 
 ### 6.6 **Px impossible à installer ?** Deux sorties
 
