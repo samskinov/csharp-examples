@@ -1,8 +1,8 @@
 # Installer / compiler Continue (VS Code + CLI) avec les patchs
 
 Ce repo fournit **3 patchs** à appliquer sur `continuedev/continue` (v2.1.0 ou
-main) qui rendent le build et l'exécution complets **sans aucun téléchargement
-en dehors du registry npm** (rien depuis GitHub, nodejs.org ou S3) — pensés
+main) qui suppriment les dépendances aux binaires natifs (SQLite natif,
+ripgrep) et rendent le build reproductible depuis le registry npm seul — pensés
 pour les postes derrière un proxy d'entreprise.
 
 ## Les 3 patchs (dans cet ordre)
@@ -48,42 +48,49 @@ rmdir /s /q .git\rebase-apply 2>nul
 git reset --hard refs/remotes/origin/main
 ```
 
-## 2. Installs (registry npm uniquement)
+## 2. Installs + builds (registry npm uniquement)
+
+⚠️ `scripts\build-packages.js` ne construit **que** `packages\*` — il ne touche
+ni `core`, ni `gui`, ni les extensions. Après un `git clean -xfd` (qui supprime
+tous les `node_modules`), `core` doit donc être **réinstallé et recompilé
+explicitement**. Sans ça, le `tsc` de `gui` échoue avec des dizaines de
+« Cannot find module ... » qui pointent vers `..\core\...` : gui résout les
+types de `core` via `core\index.d.ts`, qui a besoin des dépendances de core.
 
 ```cmd
-:: packages internes (ordre géré par le script officiel) :
+:: 1) packages internes (config-types, terminal-security, fetch, ...)
 node .\scripts\build-packages.js
 
-:: par dossier (si besoin de repasser) :
-cd packages\config-types & npm install & npm run build & cd ..\..
-cd packages\terminal-security & npm install & npm run build & cd ..\..
-cd packages\llm-info & npm install & npm run build & cd ..\..
-cd packages\config-yaml & npm install & npm run build & cd ..\..
-cd packages\fetch & npm install & npm run build & cd ..\..
-cd packages\openai-adapters & npm install & npm run build & cd ..\..
-cd core & npm install & npm run build & cd ..\..
+:: 2) core — OBLIGATOIRE avant gui
+::    --ignore-scripts évite les téléchargements hors registry npm
+::    (sharp/libvips et Chrome de puppeteer, inutiles au build) :
+cd core && npm install --ignore-scripts --no-audit --no-fund && npm run build && cd ..
 
-cd gui & npm install & cd ..
-cd extensions\vscode & npm install & cd ..\..
-cd extensions\cli & npm install & cd ..\..
+:: 3) gui et extensions : installation des dépendances
+cd gui && npm install --no-audit --no-fund && cd ..
+cd extensions\vscode && npm install --no-audit --no-fund && cd ..\..
+cd extensions\cli && npm install --no-audit --no-fund && cd ..\..
 ```
 
-Aucun module natif à compiler : sqlite3 est remplacé par `node-sqlite3-wasm`
-(WASM depuis le registry), la recherche par une implémentation intégrée,
-l'esbuild embarqué vient du bucket S3 (si bloqué : voir note § 5).
+⚠️ En CMD, `&` **continue après un échec** ; `&&` s'arrête au premier échec.
+Chaque ligne ci-dessus est une étape : si elle renvoie un code ≠ 0
+(`echo %ERRORLEVEL%`), corrigez-la avant de passer à la suivante.
+
+Aucun module natif à compiler pour le build : sqlite3 est remplacé par
+`node-sqlite3-wasm` (WASM depuis le registry), la recherche par une
+implémentation intégrée.
 
 ## 3. Build de l'extension VS Code (VSIX)
 
 ```cmd
-cd gui
-npm run build                      :: tsc + vite -> gui\dist
-cd ..\extensions\vscode
-npm run prepackage -- --target win32-x64
-npm run package -- --target win32-x64
-::   -> build\continue-<version>.vsix
+cd gui && npm run build && cd ..
+::   tsc + vite -> gui\dist
+
+cd extensions\vscode && npm run prepackage -- --target win32-x64 && npm run package -- --target win32-x64 && cd ..\..
+::   -> extensions\vscode\build\continue-<version>.vsix
 
 :: installation :
-code --install-extension build\continue-<version>.vsix
+code --install-extension extensions\vscode\build\continue-<version>.vsix
 ```
 
 ## 4. Build du CLI (`cn`)
@@ -103,13 +110,18 @@ npm link                           :: (optionnel) commande `cn` globale
 - **Node 24** validé de bout en bout (v24.22.3) : `engines` >= 20.20.1 ✓.
 - Le **tag nommé `main`** du repo rend `main..branche` ambigu : utiliser
   `refs/heads/main..` dans les comparaisons git.
+- **« Cannot find module 'lru-cache' / 'web-tree-sitter' / ... »** dans le build
+  de `gui`, avec des chemins `..\core\...` : les dépendances de `core` ne sont
+  pas installées. Refaire l'étape 2 (`cd core && npm install ...`). C'est le
+  symptôme typique d'un `git clean -xfd` suivi de `build-packages.js` seul.
+- Le `--ignore-scripts` de l'étape 2 évite deux téléchargements hors registry
+  npm faits par des dépendances de `core` : le libvips de `sharp` (GitHub) et
+  le Chrome de `puppeteer` (Google). Ils ne servent pas au build : le code
+  Transformers.js vendoré n'importe pas `sharp`, et l'indexation de docs avec
+  puppeteer est optionnelle.
 - L'esbuild embarqué du VSIX vient du **bucket S3 AWS**
   (`continue-server-binaries.s3.us-west-1.amazonaws.com`) — souvent autorisé
   par les proxies corporate. Si bloqué : le VSIX fonctionne, seule la
   compilation de `config.ts` custom à l'exécution est absente.
-- En cas d'erreur résiduelle (mirror d'entreprise, DLP), les recettes
-  détaillées par téléchargeur sont dans l'historique git de ce fichier
-  (versions antérieures) — mais avec les 3 patchs elles ne devraient plus
-  être nécessaires.
 - Télémétrie : **strictement opt-in** (`CONTINUE_CLI_ENABLE_TELEMETRY=1` +
   endpoint OTel) — rien ne part par défaut.
