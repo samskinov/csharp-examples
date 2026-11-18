@@ -322,15 +322,34 @@ npm rebuild sqlite3
 - Règle pratique : `npm ci` une fois quand tout passe ; ensuite `npm install`
   + `npm rebuild` ciblés.
 
-### 6.4 Proxy NTLM / Kerberos (le 407 persiste avec identifiants)
+### 6.4 Proxy NTLM / Kerberos / **Negotiate** (le 407 persiste avec identifiants)
 
-npm et node-gyp ne parlent pas NTLM. Installer un proxy local qui gère
-l'authentification Windows — **Px** ou **Cntlm** — puis tout pointer dessus :
+npm et node-gyp ne parlent pas Negotiate (handshake NTLM/Kerberos multi-étapes) :
+les identifiants en clair dans l'URL ne servent à rien — 407 systématique, même si
+le navigateur / Git-for-Windows (Schannel) passent. Solution : un **proxy local
+qui fait le Negotiate avec la session Windows** — **Px**
+(https://github.com/run-the-run/px) :
 
 ```powershell
-npm config set proxy "http://127.0.0.1:3128"
-npm config set https-proxy "http://127.0.0.1:3128"
+# Px auto-détecte le proxy système (WinINET) + les identifiants de session
+px --allow 127.0.0.1     # écoute sur http://127.0.0.1:3128
+# si l'auto-détection échoue : PxServer = proxy.corp:8080 dans px.ini
+
+# pointer TOUT le tooling Node dessus :
+npm config set proxy http://127.0.0.1:3128
+npm config set https-proxy http://127.0.0.1:3128
+set HTTP_PROXY=http://127.0.0.1:3128
+set HTTPS_PROXY=http://127.0.0.1:3128
+set NO_PROXY=127.0.0.1,localhost
 ```
+
+Couverture après Px : prebuild-install (sqlite3) ✅, node-gyp/headers ✅,
+registry npm ✅, @vscode/ripgrep ✅. **Exception** : le libvips de sharp 0.32
+(simple-get ne lit aucun proxy) → garder `sharp_libvips_local_prebuilds` (§ 6.2c).
+
+Alternative : **Cntlm** (NTLM seulement — échoue si le proxy n'accepte que
+Kerberos) ; ou la voie **binaires manuels** (§ 6.2c/e) qui fonctionne quel que
+soit le proxy.
 
 Divers :
 - mot de passe dans l'URL : **URL-encoder** les caractères spéciaux (`@`→`%40`…) ;
