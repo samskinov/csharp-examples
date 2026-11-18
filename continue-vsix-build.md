@@ -195,13 +195,34 @@ node -e "import('sharp').then(()=>console.log('sharp OK'))"
 
 **c) 407 sur un `.tar.br` (libvips de `sharp@0.32.6`, tiré par
 `@xenova/transformers` de core)**
+
+Le downloader (`simple-get`) **ignore le proxy npm** → miroir local obligatoire.
+Version attendue par sharp 0.32.6 : **libvips 8.14.5** (le nom exact figure dans
+le message d'erreur).
+
+Recette **sans serveur HTTP** (option du code sharp : `sharp_libvips_local_prebuilds`,
+cherche `<dossier>\v<version>\<tarball>`) :
 ```powershell
-# 1) télécharger dans le navigateur le .tar.br dont l'URL figure dans le message
-# 2) C:\sharp-dist\libvips-vX.Y.Z-win32-x64.tar.br
-python -m http.server 8080 --directory C:\sharp-dist
-$env:SHARP_DIST_BASE_URL = "http://127.0.0.1:8080/"
-# 3) relancer l'install de core (npm ci ou npm run build:local-deps)
+# 1) navigateur : https://github.com/lovell/sharp-libvips/releases/download/v8.14.5/libvips-8.14.5-win32-x64.tar.br
+# 2) layout exigé : C:\sharp-dist\v8.14.5\libvips-8.14.5-win32-x64.tar.br
+npm config set sharp_libvips_local_prebuilds "C:\sharp-dist"
+# 3) relancer l'install de core - le log doit dire "Using local libvips from ..."
 ```
+
+Variante serveur HTTP (attention aux pièges) :
+```powershell
+python -m http.server 8080 --directory C:\sharp-dist
+$env:SHARP_DIST_BASE_URL = "http://127.0.0.1:8080/"   # slash final OBLIGATOIRE
+# fichier À PLAT dans le dossier servi (pas de sous-dossier v8.14.5 avec cette option)
+```
+
+**Pièges** :
+- `npm_config_sharp_dist_base_url` (dans .npmrc) **écrase** `SHARP_DIST_BASE_URL`
+  → vérifier `npm config get sharp_dist_base_url` ;
+- env `$env:` définie dans un autre terminal que celui d'npm ;
+- nom du tarball différent de celui demandé (se fier au message d'erreur) ;
+- **simple-get n'utilise pas le proxy npm** → seul le miroir/local fonctionne pour
+  ce download (c'est pourquoi le 407 persistait malgré npm config proxy).
 
 **d) `comment-json` introuvable au build du CLI**
 - `npm ls comment-json` doit être lancé **dans `core/`** (dep de core, pas du
