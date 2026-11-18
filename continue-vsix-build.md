@@ -264,6 +264,32 @@ Vérifier dans le **même** terminal : `echo %npm_config_sharp_libvips_local_pre
 (CMD) / `$env:npm_config_sharp_libvips_local_prebuilds` (PS), puis le log
 d'install doit dire « Using local libvips from … ».
 
+### 6.3bis `npm ci` vs `npm install` (itération sur poste corporate)
+
+`npm ci` **supprime systématiquement `node_modules`** et réinstalle tout —
+chaque exécution rejoue les scripts d'install (sqlite3, sharp → vos miroirs
+doivent rester en place) et repasse par tous les téléchargements sensibles.
+Pour itérer :
+
+```cmd
+:: premier install complet (une fois, avec les fixes proxy actifs) :
+npm ci --no-audit --no-fund --prefer-offline
+
+:: itérations (quasi instantané si rien n'a changé) :
+npm install --no-audit --no-fund --prefer-offline
+
+:: un seul natif à refaire :
+npm rebuild sqlite3
+```
+
+- `--prefer-offline` : cache npm local sans re-vérifier le registry (moins de
+  réseau, moins de 407) ; `--no-audit --no-fund` : supprime l'audit réseau.
+- Si `npm ci` **échoue en cours**, il laisse un arbre **partiel** (c'est la cause
+  du « comment-json introuvable ») → `npm install` complète l'arbre existant
+  au lieu de repartir de zéro.
+- Règle pratique : `npm ci` une fois quand tout passe ; ensuite `npm install`
+  + `npm rebuild` ciblés.
+
 ### 6.4 Proxy NTLM / Kerberos (le 407 persiste avec identifiants)
 
 npm et node-gyp ne parlent pas NTLM. Installer un proxy local qui gère
