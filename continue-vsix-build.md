@@ -21,7 +21,7 @@ propre. Version de référence : `v2.1.0-vscode` (tag) ou `main` (état final).
 ```cmd
 git clone https://github.com/continuedev/continue continue
 cd continue
-git checkout v2.1.0-vscode
+git checkout main
 
 :: télécharger les 3 patchs depuis ce repo (navigateur OK) :
 ::   raw.githubusercontent.com/samskinov/csharp-examples/main/<fichier>.patch
@@ -29,6 +29,23 @@ git am continue-improvements.patch
 git am continue-cli-modes.patch
 git am continue-fallbacks.patch
 :: (secours si git am échoue : git apply -3 <fichier>)
+```
+
+⚠️ **Base exacte obligatoire** : les patchs sont générés sur l'état final de
+`main` (commit `5522c6f` — « docs: remove Sign in link… »). **Ne pas utiliser le
+tag `v2.1.0-vscode`** : il pointe quelques commits plus tôt et certains hunks ne
+s'appliquent pas. Test décisif après checkout :
+
+```cmd
+git log -1
+:: doit afficher : 5522c6f docs: remove Sign in link (login flow retired) (#13005)
+```
+
+Si un `git am` a été interrompu auparavant, purger l'état résiduel :
+```cmd
+git am --abort 2>nul
+rmdir /s /q .git\rebase-apply 2>nul
+git reset --hard refs/remotes/origin/main
 ```
 
 ## 2. Installs (registry npm uniquement)
