@@ -121,7 +121,12 @@ npm link                           :: (optionnel) commande `cn` globale
   utilisés au runtime. Si elle manque, l'install de core n'a pas abouti ou les
   devDependencies ont été omises (`NODE_ENV=production`, `--omit=dev`).
   Relancer `npm install --include=dev --ignore-scripts` puis vérifier
-  `dir node_modules\shiki`.
+  `dir node_modules\shiki`. Si elle reste absente, forcer :
+  `npm install shiki@3.23.0 --save-dev --ignore-scripts --no-audit --no-fund`
+  puis vérifier `node -p "require('./node_modules/shiki/package.json').version"`.
+  Si cette install échoue, la vraie cause est dans son log (chemin de clone
+  trop long sous Windows, tarball bloqué par le proxy, disque plein) — shiki
+  n'est que le premier module manquant.
 - Le `--ignore-scripts` de l'étape 2 évite deux téléchargements hors registry
   npm faits par des dépendances de `core` : le libvips de `sharp` (GitHub) et
   le Chrome de `puppeteer` (Google). Ils ne servent pas au build : le code
