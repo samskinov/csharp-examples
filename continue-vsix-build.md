@@ -322,7 +322,41 @@ npm rebuild sqlite3
 - Règle pratique : `npm ci` une fois quand tout passe ; ensuite `npm install`
   + `npm rebuild` ciblés.
 
-### 6.5bis **Px impossible à installer ?** Deux sorties
+### 6.5bis **Cheat-sheet hors-ligne : lien URL → où placer → vérification**
+
+Versions validées dans l'arbre installé (win32-x64, Node 24) :
+
+| # | Binaire | URL (télécharger au **navigateur**, il passe le Negotiate) | Où placer | Vérification |
+|---|---|---|---|---|
+| 1 | **binding sqlite3** (core) | `https://github.com/TryGhost/node-sqlite3/releases/download/v5.1.7/sqlite3-v5.1.7-napi-v6-win32-x64.tar.gz` | extraire dans `core\node_modules\sqlite3\` → `build\Release\node_sqlite3.node` (ou le `.tar.gz` dans `core\node_modules\sqlite3\prebuilds\`) | `cd core\node_modules\sqlite3 && node -e "require('sqlite3');console.log('OK')"` |
+| 2 | **libvips** (sharp 0.32.6 de core) | `https://github.com/lovell/sharp-libvips/releases/download/v8.14.5/libvips-8.14.5-win32-x64.tar.br` | `C:\sharp-dist\v8.14.5\libvips-8.14.5-win32-x64.tar.br` + `.npmrc` : `sharp_libvips_local_prebuilds=C:/sharp-dist` | `cd core && npm rebuild sharp` → log « Using local libvips » |
+| 3 | **sharp 0.33** (CLI, images) | `https://registry.npmjs.org/@img/sharp-win32-x64/-/sharp-win32-x64-0.33.5.tgz` | `cd extensions\cli ; npm i @img/sharp-win32-x64@0.33.5 --save-optional` (ou extraire le .tgz dans `node_modules\@img\sharp-win32-x64`) | `node -e "import('sharp').then(()=>console.log('OK'))"` |
+| 4 | **ripgrep** (VSIX, `@vscode/ripgrep@1.15.9`) | `https://github.com/microsoft/ripgrep-prebuilt/releases/download/v13.0.0-10/ripgrep-13.0.0-10-x86_64-pc-windows-msvc.zip` | extraire `rg.exe` → `extensions\vscode\node_modules\@vscode\ripgrep\bin\rg.exe` | `...\bin\rg.exe --version` |
+| 5 | **esbuild embarqué** (VSIX prepackage, S3 — souvent autorisé par le proxy) | `https://continue-server-binaries.s3.us-west-1.amazonaws.com/win32-x64/esbuild.zip` | extraire dans `extensions\vscode\node_modules\@esbuild\` | le dossier contient `esbuild.exe` |
+| 6 | **headers Node** (si compilation source) | `https://nodejs.org/dist/v24.15.0/node-v24.15.0-headers.tar.gz` | inutile si `npm config set nodedir "C:\Program Files\nodejs"` | `npm rebuild sqlite3` ne télécharge pas |
+
+> ⚠️ **Projet-local** : les chemins `core\node_modules\...` et
+> `extensions\vscode\node_modules\...` sont relatifs au clone ; faites les
+> placements **après** les `npm install/ci` correspondants (npm peut recréer
+> node_modules).
+
+Séquence de rebuild complète ensuite :
+
+```cmd
+cd core
+npm install --no-audit --no-fund --prefer-offline
+npm run build
+cd ..\extensions\cli
+npm install --no-audit --no-fund --prefer-offline
+npm run build
+node dist\cn.js --help
+cd ..\vscode
+set SKIP_INSTALLS=true
+npm run prepackage -- --target win32-x64
+npm run package -- --target win32-x64
+```
+
+### 6.6 **Px impossible à installer ?** Deux sorties
 
 **A) Proxy NTLM en pur Node** (le registry npm fonctionne chez vous) :
 ```cmd
@@ -364,7 +398,7 @@ npm run package -- --target win32-x64
 Note : le tarball sqlite extrait à l'étape 1 donne `build\Release\node_sqlite3.node`
 — c'est exactement ce que le prepackage attend (il copie depuis core).
 
-### 6.6 Proxy NTLM / Kerberos / **Negotiate** (le 407 persiste avec identifiants)
+### 6.7 Proxy NTLM / Kerberos / **Negotiate** (le 407 persiste avec identifiants)
 
 npm et node-gyp ne parlent pas Negotiate (handshake NTLM/Kerberos multi-étapes) :
 les identifiants en clair dans l'URL ne servent à rien — 407 systématique, même si
