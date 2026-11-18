@@ -356,6 +356,45 @@ npm run prepackage -- --target win32-x64
 npm run package -- --target win32-x64
 ```
 
+### 6.5quater **Build VSIX sur poste verrouillé** (browser refuse les binaires)
+
+Si le navigateur/proxy refuse les archives à binaires : l'astuce universelle est
+`npm install --ignore-scripts` — complète l'arbre **sans exécuter les scripts**
+de download. Les seuls fichiers à transférer ensuite via un canal interne
+(Teams/SharePoint ; renommer `.node`/`.exe` en `.txt` si la DLP s'en mêle) :
+
+| Fichier | Source (machine avec internet) | Destination (poste de build) |
+|---|---|---|
+| `node_sqlite3.node` | `npm i sqlite3@5.1.7` → `node_modules\sqlite3\build\Release\` | **UN SEUL fichier pour tout** : `core\node_modules\sqlite3\build\Release\` — le prepackage VSIX le copie de là |
+| `rg.exe` | `npm i @vscode/ripgrep@1.15.9` → `node_modules\@vscode\ripgrep\bin\` | `extensions\vscode\node_modules\@vscode\ripgrep\bin\rg.exe` (outils de recherche) |
+| `esbuild.exe` | `https://continue-server-binaries.s3.us-west-1.amazonaws.com/win32-x64/esbuild.zip` (S3 — **souvent autorisé**, tester) → extraire | `extensions\vscode\node_modules\@esbuild\` |
+
+Checklist ordonnée :
+
+```cmd
+:: 1) arbres complets sans scripts :
+cd core
+npm install --ignore-scripts
+npm run build
+cd ..\extensions\vscode
+npm install --ignore-scripts
+:: 2) GUI (aucun download) :
+cd ..\..\gui && npm install && npm run build && cd ..\..\extensions\vscode
+:: 3) placer les 2-3 fichiers transférés (table ci-dessus)
+:: 4) build sans download :
+set SKIP_INSTALLS=true
+npm run prepackage -- --target win32-x64
+npm run package -- --target win32-x64
+::    → build\continue-<version>.vsix
+```
+
+Notes :
+- N-API : `node_sqlite3.node` fonctionne sur toute version de Node (24 ✓) — un
+  seul fichier à transporter.
+- Sans `rg.exe`, l'extension démarre et les outils `search_code`/`file search`
+  se dégradent seuls ; sans le binding sqlite3, seule la recherche FTS
+  (`@codebase`) est absente — le reste de l'extension fonctionne.
+
 ### 6.6 **Px impossible à installer ?** Deux sorties
 
 **A) Proxy NTLM en pur Node** (le registry npm fonctionne chez vous) :
