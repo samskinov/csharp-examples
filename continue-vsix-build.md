@@ -81,6 +81,50 @@ Aucun module natif à compiler pour le build : sqlite3 est remplacé par
 `node-sqlite3-wasm` (WASM depuis le registry), la recherche par une
 implémentation intégrée.
 
+### Réinstallation propre (node_modules incomplet)
+
+Symptômes : `Cannot find module 'shiki'`, `'safer-buffer'`, `'symbol-tree'`, ...
+alors que le dossier semble présent dans `node_modules`. `npm install` est
+incrémental et peut laisser un arbre partiel après une installation
+interrompue ; `npm ci` repart de zéro et échoue franchement si un paquet ne peut
+pas être téléchargé.
+
+```cmd
+:: (si les packages internes ne sont pas construits :)
+node .\scripts\build-packages.js
+
+cd core
+rmdir /s /q node_modules
+npm ci --include=dev --ignore-scripts --no-audit --no-fund
+echo CORE_INSTALL=%ERRORLEVEL%
+npm run build
+
+cd ..\gui
+rmdir /s /q node_modules
+npm ci --no-audit --no-fund
+npm run build
+
+cd ..\extensions\vscode
+rmdir /s /q node_modules
+npm ci --no-audit --no-fund
+echo VSCODE_INSTALL=%ERRORLEVEL%
+npm run prepackage -- --target win32-x64
+npm run package -- --target win32-x64
+```
+
+Vérification rapide côté core :
+
+```cmd
+cd core
+node -p "require.resolve('shiki/package.json')"
+node -p "require.resolve('safer-buffer/package.json')"
+node -p "require.resolve('symbol-tree/package.json')"
+```
+
+Si `npm ci` échoue avec `EINTEGRITY` : `npm cache verify`, puis si besoin
+`npm cache clean --force`, et relancer. Si l'échec est un 407/403 sur un
+tarball, c'est ce paquet qu'il faut autoriser sur le proxy.
+
 ## 3. Build de l'extension VS Code (VSIX)
 
 ```cmd
