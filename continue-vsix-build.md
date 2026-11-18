@@ -369,24 +369,57 @@ de download. Les seuls fichiers à transférer ensuite via un canal interne
 | `rg.exe` | `npm i @vscode/ripgrep@1.15.9` → `node_modules\@vscode\ripgrep\bin\` | `extensions\vscode\node_modules\@vscode\ripgrep\bin\rg.exe` (outils de recherche) |
 | `esbuild.exe` | `https://continue-server-binaries.s3.us-west-1.amazonaws.com/win32-x64/esbuild.zip` (S3 — **souvent autorisé**, tester) → extraire | `extensions\vscode\node_modules\@esbuild\` |
 
-Checklist ordonnée :
+Checklist ordonnée (après `npm install --ignore-scripts`) :
 
 ```cmd
-:: 1) arbres complets sans scripts :
+:: ===== A. Builds locaux (aucun download) =====
 cd core
 npm install --ignore-scripts
-npm run build
-cd ..\extensions\vscode
+npm run build                          :: tsc → dist
+cd ..\gui
+npm install
+npm run build                          :: tsc + vite → gui\dist
+cd ..\extensions\cli
+npm install --no-audit --no-fund --prefer-offline
+npm run build                          :: → dist\cn.js
+node dist\cn.js --help                 :: vérif (flags --mode / --tool-mode)
+
+:: ===== B. VSIX =====
+cd ..\vscode
 npm install --ignore-scripts
-:: 2) GUI (aucun download) :
-cd ..\..\gui && npm install && npm run build && cd ..\..\extensions\vscode
-:: 3) placer les 2-3 fichiers transférés (table ci-dessus)
-:: 4) build sans download :
+
+:: 1) schéma config-yaml (local, aucun download binaire) :
+cd ..\..\packages\config-yaml
+npm install
+npm run generate-schema
+
+:: 2) binding sqlite3 OBLIGATOIRE pour prepackage (il copie depuis core) :
+::    copier le tarball dans core\node_modules\sqlite3\ puis :
+cd ..\..\core\node_modules\sqlite3
+tar -xvzf sqlite3-v5.1.7-napi-v6-win32-x64.tar.gz
+::    → build\Release\node_sqlite3.node
+
+:: 3) (optionnel) esbuild embarqué - S3, souvent autorisé :
+::    browser → https://continue-server-binaries.s3.us-west-1.amazonaws.com/win32-x64/esbuild.zip
+::    → extensions\vscode\node_modules\@esbuild\ puis Expand-Archive
+::    sans lui : seul le runtime de config.ts custom se dégrade
+
+:: 4) build VSIX sans aucun download :
+cd ..\..\extensions\vscode
 set SKIP_INSTALLS=true
 npm run prepackage -- --target win32-x64
 npm run package -- --target win32-x64
 ::    → build\continue-<version>.vsix
 ```
+
+Prérequis de la séquence :
+
+| Étape | Prérequis | Dégradation si absent |
+|---|---|---|
+| core/cli/gui `npm run build` | `npm install` (tsc ✓) | - |
+| schema `generate-schema` | deps de config-yaml | autocomplétion config.yaml perdue |
+| **binding sqlite3 extrait** | tarball transféré/obtenu | **prepackage échoue** (il copie depuis core) |
+| esbuild embarqué | zip S3 via browser | config.ts custom non compilable à l'exécution |
 
 Notes :
 - N-API : `node_sqlite3.node` fonctionne sur toute version de Node (24 ✓) — un
