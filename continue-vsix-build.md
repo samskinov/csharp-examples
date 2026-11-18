@@ -235,7 +235,36 @@ npm ci ; npm run build
 cd ..\extensions\cli ; npm run build ; node dist\cn.js --help
 ```
 
-### 6.3 Proxy NTLM / Kerberos (le 407 persiste avec identifiants)
+### 6.4 npm ≥ 9/11 rejette `npm config set` pour ces clés (« not a valid option »)
+
+npm valide désormais les clés : les options tierces (sharp, etc.) se posent
+**directement dans `.npmrc`** (npm passe tous les champs en `npm_config_*` aux
+scripts d'install) :
+
+```ini
+# %USERPROFILE%\.npmrc  (global) ou core\.npmrc (projet-local)
+sharp_libvips_local_prebuilds=C:/sharp-dist
+```
+
+Ou par **variables d'environnement** (le nom = `npm_config_` + option en
+minuscules) :
+
+```cmd
+:: CMD - session courante
+set npm_config_sharp_libvips_local_prebuilds=C:\sharp-dist
+:: CMD - persistant (nouvelle fenêtre requise ensuite)
+setx npm_config_sharp_libvips_local_prebuilds "C:\sharp-dist"
+```
+```powershell
+# PowerShell - session courante
+$env:npm_config_sharp_libvips_local_prebuilds = "C:\sharp-dist"
+```
+
+Vérifier dans le **même** terminal : `echo %npm_config_sharp_libvips_local_prebuilds%`
+(CMD) / `$env:npm_config_sharp_libvips_local_prebuilds` (PS), puis le log
+d'install doit dire « Using local libvips from … ».
+
+### 6.5 Proxy NTLM / Kerberos (le 407 persiste avec identifiants)
 
 npm et node-gyp ne parlent pas NTLM. Installer un proxy local qui gère
 l'authentification Windows — **Px** ou **Cntlm** — puis tout pointer dessus :
