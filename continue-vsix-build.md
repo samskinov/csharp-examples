@@ -224,6 +224,38 @@ $env:SHARP_DIST_BASE_URL = "http://127.0.0.1:8080/"   # slash final OBLIGATOIRE
 - **simple-get n'utilise pas le proxy npm** → seul le miroir/local fonctionne pour
   ce download (c'est pourquoi le 407 persistait malgré npm config proxy).
 
+**e) `prebuild-install warn install status code 407` (sharp 0.32 / sqlite3)**
+
+`prebuild-install` est le downloader partagé de `sharp@0.32.6` et `sqlite3@5.1.7`
+dans core. Contrairement au libvips.js de sharp, **il lit le proxy npm** :
+
+```cmd
+npm config set https-proxy "http://USER:PASS@proxy.corp:8080"
+npm config set proxy "http://USER:PASS@proxy.corp:8080"
+:: (URL-encoder le mot de passe ; NTLM -> Px/Cntlm requis)
+```
+
+Recette sans réseau : il cherche **d'abord** le tarball dans
+`core\node_modules\<package>\prebuilds\<nom-exact-de-l-url>` :
+```cmd
+:: URL exacte tentée (depuis le dossier du package) :
+cd core\node_modules\sqlite3
+npx prebuild-install --verbose 2>&1 | findstr /i "http"
+:: navigateur : télécharger CE tarball exact depuis GitHub
+:: puis : core\node_modules\sqlite3\prebuilds\<fichier-exact.tar.gz>
+cd core
+npm rebuild sqlite3
+```
+Cache global aussi consulté : `%LOCALAPPDATA%\npm-cache\_prebuilds\`.
+
+**e-bis) Tableau des 3 downloaders natifs rencontrés**
+
+| Downloader | Packages | Proxy npm lu ? | Fichier local |
+|---|---|---|---|
+| `prebuild-install` | sharp 0.32, sqlite3 | ✅ (`npm_config_https_proxy`) | `prebuilds\` du package |
+| `libvips.js` (sharp) | libvips de sharp 0.32 | ❌ (simple-get) | `sharp_libvips_local_prebuilds` |
+| `node-pre-gyp` | fallback sqlite3 | partiel | `sqlite3_binary_host_mirror` |
+
 **d) `comment-json` introuvable au build du CLI**
 - `npm ls comment-json` doit être lancé **dans `core/`** (dep de core, pas du
   CLI ni de la racine — « not found » ailleurs est normal)
