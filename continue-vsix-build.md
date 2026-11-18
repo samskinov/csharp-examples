@@ -1,597 +1,98 @@
-# Compiler Continue (VS Code) avec le patch — VSIX win32-x64
+# Installer / compiler Continue (VS Code + CLI) avec les patchs
 
-Instructions pour compiler l'extension VS Code **Continue v2.1.0** avec le patch
-[`continue-improvements.patch`](./continue-improvements.patch) (14 commits), sur **Windows** avec **Node 24**.
+Ce repo fournit **3 patchs** à appliquer sur `continuedev/continue` (v2.1.0 ou
+main) qui rendent le build et l'exécution complets **sans aucun téléchargement
+en dehors du registry npm** (rien depuis GitHub, nodejs.org ou S3) — pensés
+pour les postes derrière un proxy d'entreprise.
 
-## Patch optionnel n°2 
+## Les 3 patchs (dans cet ordre)
 
-[`continue-cli-modes.patch`](./continue-cli-modes.patch) (**4 commits**) s'applique **après** le premier patch
-(`git am continue-improvements.patch` puis `git am continue-cli-modes.patch`) et ajoute au **CLI** :
+| Ordre | Fichier | Contenu |
+|---|---|---|
+| 1 | `continue-improvements.patch` | 14 commits : résilience stream/thinking/429, freezes (tokenisation workers, sessions async), tools, watchdog |
+| 2 | `continue-cli-modes.patch` | 4 commits : CLI chat/plan/agent + tools text, streaming live, perf GUI |
+| 3 | `continue-fallbacks.patch` | 1 commit : SQLite WASM (plus de binding natif), recherche intégrée (plus de ripgrep), prepackage adapté |
 
-- **Mode chat** (sans tools, conversation simple) — mode de permission `chat`, dans le cycle Shift+Tab
-  et via `--mode chat` :
-  ```powershell
-  cn --mode chat          # conversation pure, aucun outil offert au modèle
-  cn --mode plan          # lecture seule (existant)
-  cn --mode normal        # agent avec approbations (existant)
-  cn --mode auto          # tout permis (existant)
-  ```
-- **Mode tools `text`** pour serveurs OpenAI-compatibles au function calling peu fiable :
-  les outils sont décrits dans le system message et les appels sont parsés depuis des blocs
-  ```` ```tool ```` de la réponse — le paramètre natif `tools` n'est **jamais** envoyé.
-  ```powershell
-  cn --tool-mode text                 # au démarrage
-  cn                                  # puis dans l'interface :
-  #   /tool-mode          -> bascule native <-> text
-  #   /tool-mode text     -> force text
-  #   Shift+Tab           -> cycle normal/plan/auto/chat
-  #   l'indicateur affiche [⏸ plan · tools:text] etc.
-  ```
-- **Résilience mid-stream** (inspirée des mid-stream retries de Gemini CLI) :
-  - 429/5xx/connexions coupées → jusqu'à 3 retries (backoff 1s/2s/4s)
-  - **continuation** : réponse partielle renvoyée en prefill assistant → le modèle **continue**
-    sans régénérer ni dupliquer ; stream thinking-only/vide → retry avec un nudge
-    « provide your final answer » ; une fois le budget épuisé, l'erreur s'affiche
-  - **watchdog d'inactivité** par chunk (120 s par défaut, `CONTINUE_CLI_IDLE_TIMEOUT_MS`, 0 = off) :
-    un serveur surchargé qui se tait est traité comme une panne retryable
-- **Streaming live** dans le TUI : le contenu en cours s'affiche par lots (~120 ms)
-  au lieu d'apparaître seulement à la fin
-- **Token estimation hybride** : les textes > 20k chars utilisent une estimation
-  (fini les freezes de l'UI pendant la validation de contexte)
-- **Télémétrie strictement opt-in** : `CONTINUE_CLI_ENABLE_TELEMETRY=1` requis
-- **GUI VS Code** (commit 4 du patch) : `StepContainer` (rendu markdown des messages
-  assistant) **mémoïsé** → pendant un stream, seul le message en cours se re-rend
-  (avant : toute l'historique visible ~8-20×/s) ; poll du stream webview 50 ms → **120 ms**
-- Combinable : `cn --mode plan --tool-mode text` ; en mode chat, aucun outil n'est proposé
-  (text ou natif) et le system message est dédié à la conversation.
-- Validation : tsc CLI ✅, **480+ tests vitest CLI ✓** (dont 4 nouveaux sur la résilience :
-  continuation sans duplication, nudge thinking-only, épuisement des retries,
-  pas de double-reprise connection-phase), GUI `tsc` + tests stream **16/16 ✓**,
-  empilement `git am` patch1+patch2 vérifié sur `main`.
+⚠️ Vérification faite : empilement `git am` 14+4+1 = **19 commits** sur `main`
+propre. Version de référence : `v2.1.0-vscode` (tag) ou `main` (état final).
 
-> ⚠️ Le VSIX `win32-x64` doit être compilé **depuis Windows** : les modules natifs
-> (LanceDB, sqlite, ripgrep) sont copiés pour la plateforme de build. La CI officielle
-> compile chaque cible sur son propre runner. Ne cross-compilez pas depuis Linux —
-> `--target` ne change que les métadonnées, pas les binaires.
+## 1. Clone + patchs
 
----
-
-## 1. Prérequis
-
-| Outil | Version |
-|---|---|
-| Node.js | **v24.x** (validé : v24.22.3 / npm 11.x ; `engines` du repo : `node >= 20.20.1`) |
-| git | récent (pour `git am`) |
-| VS Code | pour tester/installer le VSIX |
-
-## 2. Récupérer le code + le patch
-
-```powershell
+```cmd
 git clone https://github.com/continuedev/continue continue
 cd continue
-git checkout v2.1.0-vscode        # ou main (état final public, repo archivé)
+git checkout v2.1.0-vscode
 
-# Le patch est dans ce repo :
-# https://github.com/samskinov/csharp-examples/blob/main/continue-improvements.patch
-curl.exe -LO https://raw.githubusercontent.com/samskinov/csharp-examples/main/continue-improvements.patch
-
-git am continue-improvements.patch        # 14 commits
-# (secours si git am échoue : git apply -3 continue-improvements.patch)
+:: télécharger les 3 patchs depuis ce repo (navigateur OK) :
+::   raw.githubusercontent.com/samskinov/csharp-examples/main/<fichier>.patch
+git am continue-improvements.patch
+git am continue-cli-modes.patch
+git am continue-fallbacks.patch
+:: (secours si git am échoue : git apply -3 <fichier>)
 ```
 
-## 3. Contenu du patch (14 commits)
+## 2. Installs (registry npm uniquement)
 
-| # | Commit | Ce que ça corrige |
-|---|---|---|
-| 1 | `fix(llm)` | check `response.ok` + erreur typée avec `.status` (chat, responses, fim) |
-| 2 | `fix(gui)` | retry 429/rate-limit/quota/coupures (4 essais, backoff 2→16 s) **sans doublon de message** ; le partiel conservé sert de prefill → la réponse **continue** au lieu de re-thinker |
-| 3 | `fix(llm)` | ne plus perdre le `reasoning_content` d'un delta portant content + reasoning |
-| 4 | `perf` | suppression des appels bloquants (`execSync` esbuild config.ts, SecretStorage en fs sync) |
-| 5 | `fix(tools)` | guidage LLM : `read_file_range`, hiérarchie edit vs find&replace |
-| 6 | `feat(llm)` | note visible quand `finish_reason=length` (thinking qui épuise le budget sans réponse) |
-| 7 | `feat(gui)` | **watchdog d'inactivité** (120 s par défaut, `experimental.streamIdleTimeoutMs`, 0 = off) + reprise auto du tour |
-| 8 | `feat(llm)` | `reasoningBudgetTokens` → `reasoning_effort` (o-series/gpt-5 uniquement) |
-| 9 | `fix(llm)` | log des chunks Responses malformés (fin des erreurs silencieuses) |
-| 10 | `fix(gui)` | message « Premature Close » à jour (mentionne le retry auto) |
-| 11 | `perf(llm)` | **tokenisation du contexte via le pool de workers** (`llm/compileChat` était sync en JS pur → cause n°1 du freeze à l'envoi) |
-| 12 | `perf(llm)` | tokenisation du prompt/réponse/**thinking** en fin de stream via workers (cause n°2) |
-| 13 | `perf(history)` | écriture de session **asynchrone** (JSON multi-Mo + `writeFileSync` sync → cause n°3 du freeze en fin de tour) |
-| 14 | `fix(llm)` | chemin du tokenizer worker compatible jest **et** vitest |
-
-## 4. Compiler le VSIX (PowerShell, cible `win32-x64`)
-
-```powershell
-# 0) Node 24 dans le PATH
-node --version    # attendu : v24.x
-
-# 1) Packages internes + core — l'ordre de build est géré par le script du repo
+```cmd
+:: packages internes (ordre géré par le script officiel) :
 node .\scripts\build-packages.js
 
-# 2) Dépendances
-cd extensions\vscode ; npm ci ; cd ..\..
-cd gui ; npm ci ; cd ..
+:: par dossier (si besoin de repasser) :
+cd packages\config-types & npm install & npm run build & cd ..\..
+cd packages\terminal-security & npm install & npm run build & cd ..\..
+cd packages\llm-info & npm install & npm run build & cd ..\..
+cd packages\config-yaml & npm install & npm run build & cd ..\..
+cd packages\fetch & npm install & npm run build & cd ..\..
+cd packages\openai-adapters & npm install & npm run build & cd ..\..
+cd core & npm install & npm run build & cd ..\..
 
-# 3) Webview (GUI React)
+cd gui & npm install & cd ..
+cd extensions\vscode & npm install & cd ..\..
+cd extensions\cli & npm install & cd ..\..
+```
+
+Aucun module natif à compiler : sqlite3 est remplacé par `node-sqlite3-wasm`
+(WASM depuis le registry), la recherche par une implémentation intégrée,
+l'esbuild embarqué vient du bucket S3 (si bloqué : voir note § 5).
+
+## 3. Build de l'extension VS Code (VSIX)
+
+```cmd
 cd gui
-npm run build        # NODE_OPTIONS="--max-old-space-size=4096" conseillé
-cd ..
-
-# 4) Prépackage + VSIX
-cd extensions\vscode
-$env:GITHUB_TOKEN = "<votre-token-github>"   # téléchargements vscode-ripgrep / sqlite
+npm run build                      :: tsc + vite -> gui\dist
+cd ..\extensions\vscode
 npm run prepackage -- --target win32-x64
 npm run package -- --target win32-x64
-#   → extensions\vscode\build\continue-<version>.vsix
+::   -> build\continue-<version>.vsix
+
+:: installation :
+code --install-extension build\continue-<version>.vsix
 ```
 
-Installation :
+## 4. Build du CLI (`cn`)
 
-```powershell
-code --install-extension extensions\vscode\build\continue-<version>.vsix
-```
-
-### Variante linux-x64 (bash)
-
-```bash
-node ./scripts/build-packages.js
-cd extensions/vscode && npm ci && cd ../..
-cd gui && npm ci && npm run build && cd ..
-cd extensions/vscode
-GITHUB_TOKEN="<token>" npm run prepackage -- --target linux-x64
-GITHUB_TOKEN="<token>" npm run package -- --target linux-x64
-#   → extensions/vscode/build/continue-<version>.vsix
-```
-
-## 5. Notes de build
-
-- **`GITHUB_TOKEN`** : requis par `@vscode/ripgrep` et le téléchargement des binaires
-  sqlite (rate-limit GitHub) — c'est ce que la CI passe à ces étapes.
-- **`SKIP_INSTALLS=true`** avant `prepackage` : saute les réinstallations lourdes quand
-  `node_modules` sont déjà en place (itérations rapides).
-- Si `npm ci` de `core` réclame `vectordb` (étape présente en CI) : `cd core ; npm i vectordb`
-  — pas nécessaire dans l'environnement de validation de l'audit.
-- La chaîne de build des packages internes est **ordonnée obligatoirement** :
-  `config-types → terminal-security → llm-info → config-yaml → fetch → openai-adapters → core → gui → extensions/vscode`.
-  `scripts/build-packages.js` s'en charge ; ne les construisez pas à la main dans le désordre
-  (`Cannot find module '@continuedev/...'`).
-- Piège git : le repo Continue contient un **tag nommé `main`** qui rend `main..branche`
-  ambigu — utiliser `refs/heads/main..` dans les comparaisons.
-- npm 11 réécrit `core/package-lock.json` pendant l'install : ne pas le commiter.
-
-## 6. Proxy d'entreprise (407) — symptômes réels et parades
-
-Erreur **407** = le proxy d'entreprise exige une authentification. Chaque
-téléchargeur a sa propre variable de contournement — les quatre premiers
-ont tous été rencontrés sur un poste corporate Windows.
-
-### 6.1 Tableau des téléchargements → parades
-
-| Téléchargement | Source / format | Parade |
-|---|---|---|
-| **headers Node** (node-gyp compile `sqlite3`, etc.) | nodejs.org, `.tar.gz` | `npm config set nodedir "C:\Program Files\nodejs"` (utilise les headers du MSI local, **zéro download**) ou `$env:NODEJS_ORG_MIRROR` vers un miroir |
-| **libvips** (via `@xenova/transformers` → `sharp@0.32.6` de `core`) | GitHub `sharp-libvips`, **`.tar.br`** (Brotli) | télécharger le `.tar.br` dans le navigateur, le servir localement, puis `$env:SHARP_DIST_BASE_URL = "http://127.0.0.1:8080/"` |
-| **binaires sharp 0.33** (`@img/sharp-win32-x64`) | registry npm (optionalDependencies) | `npm i @img/sharp-win32-x64@0.33.5 --save-optional` — les échecs d'optional deps sont **silencieux**, le problème ne se voit qu'au 1er `import("sharp")` |
-| **ripgrep** (`@vscode/ripgrep`, postinstall) + **binaires sqlite** (prepackage VSIX) | GitHub releases | proxy npm authentifié + `$env:GITHUB_TOKEN` |
-| **registry npm** (tout le reste) | registry.npmjs.org | `npm config set proxy/https-proxy "http://USER:PASS@proxy:8080"` |
-
-### 6.2 Les quatre recettes rencontrées
-
-**a) 407 sur les headers Node (build VSIX)**
-
-ATTENTION : ne PAS utiliser `nodedir` pointant vers l'installation Node binaire
-(MSI) - elle contient include\node\*.h mais PAS common.gypi (fichier du code
-source de Node) -> erreur "common.gypi not found" a la configuration.
-
-Recette recommandee - miroir local des headers (fichiers texte, passent
-generalement le filtre de contenu) :
 ```cmd
-:: version exacte : node -v  (ex : v24.15.0)
-:: navigateur : https://nodejs.org/dist/v24.15.0/node-v24.15.0-headers.tar.gz
-:: layout : C:\nodejs-mirror\v24.15.0\node-v24.15.0-headers.tar.gz
-python -m http.server 8080 --directory C:\nodejs-mirror
-npm config delete nodedir
-set NODEJS_ORG_MIRROR=http://127.0.0.1:8080
-:: puis rebuild - node-gyp gere lui-meme l'extraction :
-npm rebuild sqlite3 --verbose
-```
-
-Methode 2 - headers EXTRAITS comme nodedir (sans serveur HTTP) :
-```cmd
-:: 1) navigateur : https://nodejs.org/dist/v24.15.0/node-v24.15.0-headers.tar.gz
-:: 2) extraire (tar.exe integre a Windows 10+) :
-mkdir C:\node-headers
-tar -xzf node-v24.15.0-headers.tar.gz -C C:\node-headers
-::    -> C:\node-headers\include\node\*.h
-:: 3) pointer nodedir dessus :
-npm config set nodedir "C:\node-headers"
-:: 4) rebuild :
-cd core
-npm rebuild sqlite3 --verbose
-```
-(avec cette methode, si "common.gypi not found" reaparait, node-gyp exige plus
-que les headers -> utiliser la Methode 1 ou la Methode 3 ci-dessous)
-
-Methode 3 - source Node COMPLETE comme nodedir (contient common.gypi garanti) :
-```cmd
-:: navigateur : https://nodejs.org/dist/v24.15.0/node-v24.15.0.tar.gz
-tar -xzf node-v24.15.0.tar.gz -C C:\node-src
-npm config set nodedir "C:\node-src\node-v24.15.0"
-```
-
-CHANGER / VERIFIER le nodedir (les 3 commandes) :
-```cmd
-npm config set nodedir "C:\node-headers"   :: definir
-npm config get nodedir                     :: voir la valeur active
-npm config delete nodedir                  :: supprimer (retour au download via NODEJS_ORG_MIRROR)
-```
-NB : la variable d'environnement session `$env:npm_config_nodedir` a la
-priorite sur .npmrc - verifier les deux si le comportement semble incoherent.
-
-**b) sharp 0.33 : « Could not load sharp » + 407 sur fallback libvips**
-```powershell
-npm config get omit          # doit être vide (sinon optional deps désactivées)
 cd extensions\cli
-npm i @img/sharp-win32-x64@0.33.5 --save-optional
-node -e "import('sharp').then(()=>console.log('sharp OK'))"
-# fallback 100% manuel : télécharger le .tgz via le navigateur puis
-#   npm i .\sharp-win32-x64-0.33.5.tgz --save-optional
+npm run build                      :: -> dist\cn.js (bundle autonome)
+
+node dist\cn.js --help             :: vérif : flags --mode / --tool-mode
+node dist\cn.js --mode chat
+node dist\cn.js --mode plan --tool-mode text
+npm link                           :: (optionnel) commande `cn` globale
 ```
 
-**c) 407 sur un `.tar.br` (libvips de `sharp@0.32.6`, tiré par
-`@xenova/transformers` de core)**
-
-Le downloader (`simple-get`) **ignore le proxy npm** → miroir local obligatoire.
-Version attendue par sharp 0.32.6 : **libvips 8.14.5** (le nom exact figure dans
-le message d'erreur).
-
-Recette **sans serveur HTTP** (option du code sharp : `sharp_libvips_local_prebuilds`,
-cherche `<dossier>\v<version>\<tarball>`) :
-```powershell
-# 1) navigateur : https://github.com/lovell/sharp-libvips/releases/download/v8.14.5/libvips-8.14.5-win32-x64.tar.br
-# 2) layout exigé : C:\sharp-dist\v8.14.5\libvips-8.14.5-win32-x64.tar.br
-npm config set sharp_libvips_local_prebuilds "C:\sharp-dist"
-# 3) relancer l'install de core - le log doit dire "Using local libvips from ..."
-```
-
-Variante serveur HTTP (attention aux pièges) :
-```powershell
-python -m http.server 8080 --directory C:\sharp-dist
-$env:SHARP_DIST_BASE_URL = "http://127.0.0.1:8080/"   # slash final OBLIGATOIRE
-# fichier À PLAT dans le dossier servi (pas de sous-dossier v8.14.5 avec cette option)
-```
-
-**Pièges** :
-- `npm_config_sharp_dist_base_url` (dans .npmrc) **écrase** `SHARP_DIST_BASE_URL`
-  → vérifier `npm config get sharp_dist_base_url` ;
-- env `$env:` définie dans un autre terminal que celui d'npm ;
-- nom du tarball différent de celui demandé (se fier au message d'erreur) ;
-- **simple-get n'utilise pas le proxy npm** → seul le miroir/local fonctionne pour
-  ce download (c'est pourquoi le 407 persistait malgré npm config proxy).
-
-**d) `comment-json` introuvable au build du CLI**
-- `npm ls comment-json` doit être lancé **dans `core/`** (dep de core, pas du
-  CLI ni de la racine — « not found » ailleurs est normal)
-- introuvable même dans `core/` → arbre incomplet (install avortée par un 407) :
-```powershell
-cd core
-If (Test-Path node_modules) { Remove-Item -Recurse -Force node_modules }
-npm ci ; npm run build
-cd ..\extensions\cli ; npm run build ; node dist\cn.js --help
-```
-
-**e) `prebuild-install warn install status code 407` (sharp 0.32 / sqlite3)**
-
-`prebuild-install` est le downloader partagé de `sharp@0.32.6` et `sqlite3@5.1.7`
-dans core. Contrairement au libvips.js de sharp, **il lit le proxy npm** :
-
-```cmd
-npm config set https-proxy "http://USER:PASS@proxy.corp:8080"
-npm config set proxy "http://USER:PASS@proxy.corp:8080"
-:: (URL-encoder le mot de passe ; NTLM -> Px/Cntlm requis)
-```
-
-Recette sans réseau : il cherche **d'abord** le tarball dans
-`core\node_modules\<package>\prebuilds\<nom-exact-de-l-url>` :
-```cmd
-:: URL exacte tentée (depuis le dossier du package) :
-cd core\node_modules\sqlite3
-npx prebuild-install --verbose 2>&1 | findstr /i "http"
-:: navigateur : télécharger CE tarball exact depuis GitHub
-:: puis : core\node_modules\sqlite3\prebuilds\<fichier-exact.tar.gz>
-cd core
-npm rebuild sqlite3
-```
-Cache global aussi consulté : `%LOCALAPPDATA%\npm-cache\_prebuilds\`.
-
-**e-bis) Tableau des 3 downloaders natifs rencontrés**
-
-| Downloader | Packages | Proxy npm lu ? | Fichier local |
-|---|---|---|---|
-| `prebuild-install` | sharp 0.32, sqlite3 | ✅ (`npm_config_https_proxy`) | `prebuilds\` du package |
-| `libvips.js` (sharp) | libvips de sharp 0.32 | ❌ (simple-get) | `sharp_libvips_local_prebuilds` |
-| `node-pre-gyp` | fallback sqlite3 | partiel | `sqlite3_binary_host_mirror` |
-
-### 6.3 npm ≥ 9/11 rejette `npm config set` pour ces clés (« not a valid option »)
-
-npm valide désormais les clés : les options tierces (sharp, etc.) se posent
-**directement dans `.npmrc`** (npm passe tous les champs en `npm_config_*` aux
-scripts d'install) :
-
-```ini
-# %USERPROFILE%\.npmrc  (global) ou core\.npmrc (projet-local)
-sharp_libvips_local_prebuilds=C:/sharp-dist
-```
-
-Ou par **variables d'environnement** (le nom = `npm_config_` + option en
-minuscules) :
-
-```cmd
-:: CMD - session courante
-set npm_config_sharp_libvips_local_prebuilds=C:\sharp-dist
-:: CMD - persistant (nouvelle fenêtre requise ensuite)
-setx npm_config_sharp_libvips_local_prebuilds "C:\sharp-dist"
-```
-```powershell
-# PowerShell - session courante
-$env:npm_config_sharp_libvips_local_prebuilds = "C:\sharp-dist"
-```
-
-Vérifier dans le **même** terminal : `echo %npm_config_sharp_libvips_local_prebuilds%`
-(CMD) / `$env:npm_config_sharp_libvips_local_prebuilds` (PS), puis le log
-d'install doit dire « Using local libvips from … ».
-
-### 6.3bis `npm ci` vs `npm install` (itération sur poste corporate)
-
-`npm ci` **supprime systématiquement `node_modules`** et réinstalle tout —
-chaque exécution rejoue les scripts d'install (sqlite3, sharp → vos miroirs
-doivent rester en place) et repasse par tous les téléchargements sensibles.
-Pour itérer :
-
-```cmd
-:: premier install complet (une fois, avec les fixes proxy actifs) :
-npm ci --no-audit --no-fund --prefer-offline
-
-:: itérations (quasi instantané si rien n'a changé) :
-npm install --no-audit --no-fund --prefer-offline
-
-:: un seul natif à refaire :
-npm rebuild sqlite3
-```
-
-- `--prefer-offline` : cache npm local sans re-vérifier le registry (moins de
-  réseau, moins de 407) ; `--no-audit --no-fund` : supprime l'audit réseau.
-- Si `npm ci` **échoue en cours**, il laisse un arbre **partiel** (c'est la cause
-  du « comment-json introuvable ») → `npm install` complète l'arbre existant
-  au lieu de repartir de zéro.
-- Règle pratique : `npm ci` une fois quand tout passe ; ensuite `npm install`
-  + `npm rebuild` ciblés.
-
-### 6.5bis **Cheat-sheet hors-ligne : lien URL → où placer → vérification**
-
-Versions validées dans l'arbre installé (win32-x64, Node 24) :
-
-| # | Binaire | URL (télécharger au **navigateur**, il passe le Negotiate) | Où placer | Vérification |
-|---|---|---|---|---|
-| 1 | **binding sqlite3** (core) | `https://github.com/TryGhost/node-sqlite3/releases/download/v5.1.7/sqlite3-v5.1.7-napi-v6-win32-x64.tar.gz` | extraire dans `core\node_modules\sqlite3\` → `build\Release\node_sqlite3.node` (ou le `.tar.gz` dans `core\node_modules\sqlite3\prebuilds\`) | `cd core\node_modules\sqlite3 && node -e "require('sqlite3');console.log('OK')"` |
-| 2 | **libvips** (sharp 0.32.6 de core) | `https://github.com/lovell/sharp-libvips/releases/download/v8.14.5/libvips-8.14.5-win32-x64.tar.br` | `C:\sharp-dist\v8.14.5\libvips-8.14.5-win32-x64.tar.br` + `.npmrc` : `sharp_libvips_local_prebuilds=C:/sharp-dist` | `cd core && npm rebuild sharp` → log « Using local libvips » |
-| 3 | **sharp 0.33** (CLI, images) | `https://registry.npmjs.org/@img/sharp-win32-x64/-/sharp-win32-x64-0.33.5.tgz` | `cd extensions\cli ; npm i @img/sharp-win32-x64@0.33.5 --save-optional` (ou extraire le .tgz dans `node_modules\@img\sharp-win32-x64`) | `node -e "import('sharp').then(()=>console.log('OK'))"` |
-| 4 | **ripgrep** (VSIX, `@vscode/ripgrep@1.15.9`) | `https://github.com/microsoft/ripgrep-prebuilt/releases/download/v13.0.0-10/ripgrep-13.0.0-10-x86_64-pc-windows-msvc.zip` | extraire `rg.exe` → `extensions\vscode\node_modules\@vscode\ripgrep\bin\rg.exe` | `...\bin\rg.exe --version` |
-| 5 | **esbuild embarqué** (VSIX prepackage, S3 — souvent autorisé par le proxy) | `https://continue-server-binaries.s3.us-west-1.amazonaws.com/win32-x64/esbuild.zip` | extraire dans `extensions\vscode\node_modules\@esbuild\` | le dossier contient `esbuild.exe` |
-| 6 | **headers Node** (si compilation source) | `https://nodejs.org/dist/v24.15.0/node-v24.15.0-headers.tar.gz` | inutile si `npm config set nodedir "C:\Program Files\nodejs"` | `npm rebuild sqlite3` ne télécharge pas |
-
-> ⚠️ **Projet-local** : les chemins `core\node_modules\...` et
-> `extensions\vscode\node_modules\...` sont relatifs au clone ; faites les
-> placements **après** les `npm install/ci` correspondants (npm peut recréer
-> node_modules).
-
-Séquence de rebuild complète ensuite :
-
-```cmd
-cd core
-npm install --no-audit --no-fund --prefer-offline
-npm run build
-cd ..\extensions\cli
-npm install --no-audit --no-fund --prefer-offline
-npm run build
-node dist\cn.js --help
-cd ..\vscode
-set SKIP_INSTALLS=true
-npm run prepackage -- --target win32-x64
-npm run package -- --target win32-x64
-```
-
-### 6.5quater **LA séquence définitive avec `--ignore-scripts`** (CLI + VSIX)
-
-**Verdict : ça passe.** Les builds (CLI + VSIX) aboutissent sans aucun
-download binaire ; à l'exécution tout fonctionne **sauf** : la recherche FTS
-`@codebase` (binding sqlite3), la recherche de fichiers (`rg.exe`) et la
-compilation de `config.ts` custom (`esbuild.exe`) — dégradations propres.
-
-```cmd
-:: ===== 1. Packages internes (aucun natif - installs normales) =====
-cd packages\config-types && npm install && npm run build && cd ..\..
-cd packages\terminal-security && npm install && npm run build && cd ..\..
-cd packages\llm-info && npm install && npm run build && cd ..\..
-cd packages\config-yaml && npm install && npm run build && cd ..\..
-cd packages\fetch && npm install && npm run build && cd ..\..
-cd packages\openai-adapters && npm install && npm run build && cd ..\..
-
-:: ===== 2. core - IGNORE-SCRIPTS (sqlite3/libvips skippés) =====
-cd core
-npm install --ignore-scripts
-npm run build                       :: tsc - dist\
-cd ..\..
-
-:: ===== 3. CLI =====
-cd extensions\cli
-npm install --ignore-scripts
-npm run build                       :: -> dist\cn.js
-node dist\cn.js --help              :: vérif : flags --mode / --tool-mode
-cd ..\..
-
-:: ===== 4. GUI =====
-cd gui
-npm install
-npm run build                       :: tsc + vite -> gui\dist
-cd ..\..
-
-:: ===== 5. schéma config-yaml (pas dans git, à générer une fois) =====
-cd packages\config-yaml
-npm run generate-schema
-cd ..\..
-
-:: ===== 6. VSIX =====
-cd extensions\vscode
-npm install --ignore-scripts
-:: dossier de binding sqlite3 - VIDE acceptable (le prepackage passe ; FTS dégradée) :
-mkdir ..\..\core\node_modules\sqlite3\build\Release
-set SKIP_INSTALLS=true
-npm run prepackage -- --target win32-x64
-npm run package -- --target win32-x64
-:: -> build\continue-<version>.vsix
-```
-
-**Optionnel pour compléter plus tard** (transfert interne, renommer .txt si DLP) :
-
-| Fichier | Où le placer | Ce que ça débloque |
-|---|---|---|
-| `node_sqlite3.node` | `core\node_modules\sqlite3\build\Release\` | FTS / `@codebase` |
-| `rg.exe` | `extensions\vscode\node_modules\@vscode\ripgrep\bin\` | recherche de fichiers |
-| `esbuild.exe` | `extensions\vscode\node_modules\@esbuild\` | config.ts custom à l'exécution |
-| tarball libvips dans `C:\sharp-dist\v8.14.5\` | (déjà dans votre .npmrc) | embeddings d'images |
-
-⚠️ Ne refaites **jamais `npm ci`** après les placements (`npm install` les préserve).
-
-### 6.6 **Px impossible à installer ?** Deux sorties
-
-**A) Proxy NTLM en pur Node** (le registry npm fonctionne chez vous) :
-```cmd
-npm i -g proxy-login-automator
-:: proxy local qui fait le NTLM vers le proxy corporate :
-proxy-login-automator --local_port 3128 --remote_host proxy.corp --remote_port 8080 --usr "DOMAINE\user" --pwd "motdepasse"
-:: puis pointer npm + HTTPS_PROXY sur http://127.0.0.1:3128 (comme Px)
-```
-
-**B) Build VSIX 100 % hors-ligne (aucun download de script)** — `SKIP_INSTALLS=true`
-skippe les téléchargements du prepackage (sqlite + esbuild S3 + npm installs),
-à condition de placer les binaires à la main (téléchargés au navigateur, qui
-passe le Negotiate) :
-
-```powershell
-# 0) packages + core construits une fois (build-packages.js, avec prebuilds/ mirror)
-node .\scripts\build-packages.js
-
-# 1) sqlite binding pour core (si l'install script de sqlite3 a échoué) :
-#    browser: https://github.com/TryGhost/node-sqlite3/releases/download/v5.1.7/sqlite3-v5.1.7-napi-v6-win32-x64.tar.gz
-cd core\node_modules\sqlite3
-tar -xzf ..\..\..\Downloads\sqlite3-v5.1.7-napi-v6-win32-x64.tar.gz
-#    → core\node_modules\sqlite3\build\Release\node_sqlite3.node
-
-# 2) esbuild embarqué dans le VSIX (bucket S3 — souvent autorisé par le proxy) :
-#    browser: https://continue-server-binaries.s3.us-west-1.amazonaws.com/win32-x64/esbuild.zip
-cd extensions\vscode
-mkdir node_modules\@esbuild 2>$null
-Copy-Item ..\..\..\Downloads\esbuild.zip node_modules\@esbuild\
-cd node_modules\@esbuild ; Expand-Archive esbuild.zip . ; cd ..\..
-
-# 3) prepackage + package SANS aucun download :
-$env:SKIP_INSTALLS = "true"
-npm run prepackage -- --target win32-x64
-npm run package -- --target win32-x64
-#   (le prepackage copie alors le binding sqlite depuis core/node_modules)
-```
-
-Note : le tarball sqlite extrait à l'étape 1 donne `build\Release\node_sqlite3.node`
-— c'est exactement ce que le prepackage attend (il copie depuis core).
-
-### 6.7 Proxy NTLM / Kerberos / **Negotiate** (le 407 persiste avec identifiants)
-
-npm et node-gyp ne parlent pas Negotiate (handshake NTLM/Kerberos multi-étapes) :
-les identifiants en clair dans l'URL ne servent à rien — 407 systématique, même si
-le navigateur / Git-for-Windows (Schannel) passent. Solution : un **proxy local
-qui fait le Negotiate avec la session Windows** — **Px**
-(https://github.com/run-the-run/px) :
-
-```powershell
-# Px auto-détecte le proxy système (WinINET) + les identifiants de session
-px --allow 127.0.0.1     # écoute sur http://127.0.0.1:3128
-# si l'auto-détection échoue : PxServer = proxy.corp:8080 dans px.ini
-
-# pointer TOUT le tooling Node dessus :
-npm config set proxy http://127.0.0.1:3128
-npm config set https-proxy http://127.0.0.1:3128
-set HTTP_PROXY=http://127.0.0.1:3128
-set HTTPS_PROXY=http://127.0.0.1:3128
-set NO_PROXY=127.0.0.1,localhost
-```
-
-Couverture après Px : prebuild-install (sqlite3) ✅, node-gyp/headers ✅,
-registry npm ✅, @vscode/ripgrep ✅. **Exception** : le libvips de sharp 0.32
-(simple-get ne lit aucun proxy) → garder `sharp_libvips_local_prebuilds` (§ 6.2c).
-
-Alternative : **Cntlm** (NTLM seulement — échoue si le proxy n'accepte que
-Kerberos) ; ou la voie **binaires manuels** (§ 6.2c/e) qui fonctionne quel que
-soit le proxy.
-
-Divers :
-- mot de passe dans l'URL : **URL-encoder** les caractères spéciaux (`@`→`%40`…) ;
-- TLS inspecté : `$env:NODE_EXTRA_CA_CERTS = "C:\certs\corp-ca.pem"` ;
-- mettre les env **avant** `build:local-deps` (le `npm install` de `core` est la
-  première compilation : sqlite3 y est gypé) ;
-- diagnostic : chaque message d'erreur 407 mentionne son domaine — un domaine
-  non couvert = une env à ajouter.
-
-## 7. Compiler le CLI (`cn`)
-
-Le CLI vit dans `extensions/cli` et se bundle en un fichier autonome (esbuild,
-12,7 Mo, `dist/cn.js`) — les packages internes et `core` sont embarqués depuis
-la source (alias dans `build.mjs`).
-
-```bash
-export PATH=<node24>/bin:$PATH      # Node 24 validé
-cd <votre-clone-de-continue>/extensions/cli
-
-# 1) Dépendances + build des packages internes et de core (ordre géré par le script)
-npm run build:local-deps            # (~5-10 min sur un clone frais)
-
-# 2) Build du bundle (validate aliases + esbuild)
-npm run build                       # → dist/index.js + dist/cn.js (wrapper)
-
-# 3) Utilisation
-node dist/cn.js --version           # sanity check (exige les patchs : les flags
-node dist/cn.js --help              #   --mode / --tool-mode apparaissent dans --help)
-node dist/cn.js --mode chat
-node dist/cn.js --mode plan --tool-mode text
-
-# 4) (optionnel) commande `cn` globale pour la session courante
-npm link                            # crée le binaire `cn` pointant sur dist/cn.js
-```
-
-Notes :
-- `npm run build:local-deps` n'est nécessaire **qu'une fois** par clone (les `dist/`
-  des packages et de `core` persistent) ; ensuite `npm run build` suffit.
-- Sur Windows : mêmes commandes en PowerShell (`npm.cmd` via npx automatique) ;
-  pas de binaire natif à compiler (fsevents macOS et le worker JSDOM sont gérés
-  par le script).
-- Version affichée `0.0.0-dev` en local : la version définitive vient du
-  `semantic-release` de la CI.
-- Logs : `npm run watch:logs` (tail de `~/.continue/logs/cn.log`).
-
-## 8. Statut de validation
-
-- Chaîne complète exécutée avec **node v24.22.3 / npm 11.19.1** : packages → core (`tsc`) →
-  gui (`tsc` + `vite build`) → extensions/vscode (`esbuild`, bundle `out/extension.js`
-  généré avec le patch complet).
-- Tests : vitest OpenAI **304/304**, jest `openaiTypeConverters`+`countTokens` **63 ✓**,
-  jest `util/history` **18/18**, tests GUI stream **16/16** (patch 1) ;
-  **480+ tests CLI ✓** dont 4 sur la résilience mid-stream, tests GUI stream **16/16** (patch 2).
-- `git am` vérifié sur `main` propre : **14/14 commits** (patch 1),
-  puis **4/4** en empilement (patch 2) — **18 commits** au total.
-- Le pas final `vsce package` est celui de la CI officielle
-  (`.github/actions/build-vscode-extension/action.yml`) ; à exécuter sur votre machine.
-
-> ⚠️ **Ordre et fichiers** : deux patchs uniquement, dans cet ordre —
-> 1. `continue-improvements.patch`, 2. `continue-cli-modes.patch`.
-> Un ancien fichier `continue-cli-chatmode.patch` (rename du patch 2 dans sa
-> version 1-commit) a été **retiré du repo** : son contenu est inclus dans
-> `continue-cli-modes.patch` — l'appliquer en plus échouerait en conflits.
+## 5. Notes
+
+- **Node 24** validé de bout en bout (v24.22.3) : `engines` >= 20.20.1 ✓.
+- Le **tag nommé `main`** du repo rend `main..branche` ambigu : utiliser
+  `refs/heads/main..` dans les comparaisons git.
+- L'esbuild embarqué du VSIX vient du **bucket S3 AWS**
+  (`continue-server-binaries.s3.us-west-1.amazonaws.com`) — souvent autorisé
+  par les proxies corporate. Si bloqué : le VSIX fonctionne, seule la
+  compilation de `config.ts` custom à l'exécution est absente.
+- En cas d'erreur résiduelle (mirror d'entreprise, DLP), les recettes
+  détaillées par téléchargeur sont dans l'historique git de ce fichier
+  (versions antérieures) — mais avec les 3 patchs elles ne devraient plus
+  être nécessaires.
+- Télémétrie : **strictement opt-in** (`CONTINUE_CLI_ENABLE_TELEMETRY=1` +
+  endpoint OTel) — rien ne part par défaut.
