@@ -158,7 +158,81 @@ GITHUB_TOKEN="<token>" npm run package -- --target linux-x64
   ambigu — utiliser `refs/heads/main..` dans les comparaisons.
 - npm 11 réécrit `core/package-lock.json` pendant l'install : ne pas le commiter.
 
-## 6. Compiler le CLI (`cn`)
+## 6. Proxy d'entreprise (407) — symptômes réels et parades
+
+Erreur **407** = le proxy d'entreprise exige une authentification. Chaque
+téléchargeur a sa propre variable de contournement — les quatre premiers
+ont tous été rencontrés sur un poste corporate Windows.
+
+### 6.1 Tableau des téléchargements → parades
+
+| Téléchargement | Source / format | Parade |
+|---|---|---|
+| **headers Node** (node-gyp compile `sqlite3`, etc.) | nodejs.org, `.tar.gz` | `npm config set nodedir "C:\Program Files\nodejs"` (utilise les headers du MSI local, **zéro download**) ou `$env:NODEJS_ORG_MIRROR` vers un miroir |
+| **libvips** (via `@xenova/transformers` → `sharp@0.32.6` de `core`) | GitHub `sharp-libvips`, **`.tar.br`** (Brotli) | télécharger le `.tar.br` dans le navigateur, le servir localement, puis `$env:SHARP_DIST_BASE_URL = "http://127.0.0.1:8080/"` |
+| **binaires sharp 0.33** (`@img/sharp-win32-x64`) | registry npm (optionalDependencies) | `npm i @img/sharp-win32-x64@0.33.5 --save-optional` — les échecs d'optional deps sont **silencieux**, le problème ne se voit qu'au 1er `import("sharp")` |
+| **ripgrep** (`@vscode/ripgrep`, postinstall) + **binaires sqlite** (prepackage VSIX) | GitHub releases | proxy npm authentifié + `$env:GITHUB_TOKEN` |
+| **registry npm** (tout le reste) | registry.npmjs.org | `npm config set proxy/https-proxy "http://USER:PASS@proxy:8080"` |
+
+### 6.2 Les quatre recettes rencontrées
+
+**a) 407 sur les headers Node (build VSIX)**
+```powershell
+$env:npm_config_nodedir = "C:\Program Files\nodejs"   # session
+npm config set nodedir "C:\Program Files\nodejs"       # persistant
+# variante miroir : $env:NODEJS_ORG_MIRROR = "http://mirror.corp/nodejs-dist"
+```
+
+**b) sharp 0.33 : « Could not load sharp » + 407 sur fallback libvips**
+```powershell
+npm config get omit          # doit être vide (sinon optional deps désactivées)
+cd extensions\cli
+npm i @img/sharp-win32-x64@0.33.5 --save-optional
+node -e "import('sharp').then(()=>console.log('sharp OK'))"
+# fallback 100% manuel : télécharger le .tgz via le navigateur puis
+#   npm i .\sharp-win32-x64-0.33.5.tgz --save-optional
+```
+
+**c) 407 sur un `.tar.br` (libvips de `sharp@0.32.6`, tiré par
+`@xenova/transformers` de core)**
+```powershell
+# 1) télécharger dans le navigateur le .tar.br dont l'URL figure dans le message
+# 2) C:\sharp-dist\libvips-vX.Y.Z-win32-x64.tar.br
+python -m http.server 8080 --directory C:\sharp-dist
+$env:SHARP_DIST_BASE_URL = "http://127.0.0.1:8080/"
+# 3) relancer l'install de core (npm ci ou npm run build:local-deps)
+```
+
+**d) `comment-json` introuvable au build du CLI**
+- `npm ls comment-json` doit être lancé **dans `core/`** (dep de core, pas du
+  CLI ni de la racine — « not found » ailleurs est normal)
+- introuvable même dans `core/` → arbre incomplet (install avortée par un 407) :
+```powershell
+cd core
+If (Test-Path node_modules) { Remove-Item -Recurse -Force node_modules }
+npm ci ; npm run build
+cd ..\extensions\cli ; npm run build ; node dist\cn.js --help
+```
+
+### 6.3 Proxy NTLM / Kerberos (le 407 persiste avec identifiants)
+
+npm et node-gyp ne parlent pas NTLM. Installer un proxy local qui gère
+l'authentification Windows — **Px** ou **Cntlm** — puis tout pointer dessus :
+
+```powershell
+npm config set proxy "http://127.0.0.1:3128"
+npm config set https-proxy "http://127.0.0.1:3128"
+```
+
+Divers :
+- mot de passe dans l'URL : **URL-encoder** les caractères spéciaux (`@`→`%40`…) ;
+- TLS inspecté : `$env:NODE_EXTRA_CA_CERTS = "C:\certs\corp-ca.pem"` ;
+- mettre les env **avant** `build:local-deps` (le `npm install` de `core` est la
+  première compilation : sqlite3 y est gypé) ;
+- diagnostic : chaque message d'erreur 407 mentionne son domaine — un domaine
+  non couvert = une env à ajouter.
+
+## 7. Compiler le CLI (`cn`)
 
 Le CLI vit dans `extensions/cli` et se bundle en un fichier autonome (esbuild,
 12,7 Mo, `dist/cn.js`) — les packages internes et `core` sont embarqués depuis
@@ -194,7 +268,7 @@ Notes :
   `semantic-release` de la CI.
 - Logs : `npm run watch:logs` (tail de `~/.continue/logs/cn.log`).
 
-## 7. Statut de validation
+## 8. Statut de validation
 
 - Chaîne complète exécutée avec **node v24.22.3 / npm 11.19.1** : packages → core (`tsc`) →
   gui (`tsc` + `vite build`) → extensions/vscode (`esbuild`, bundle `out/extension.js`
