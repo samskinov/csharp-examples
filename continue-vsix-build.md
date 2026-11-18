@@ -158,7 +158,43 @@ GITHUB_TOKEN="<token>" npm run package -- --target linux-x64
   ambigu — utiliser `refs/heads/main..` dans les comparaisons.
 - npm 11 réécrit `core/package-lock.json` pendant l'install : ne pas le commiter.
 
-## 6. Statut de validation
+## 6. Compiler le CLI (`cn`)
+
+Le CLI vit dans `extensions/cli` et se bundle en un fichier autonome (esbuild,
+12,7 Mo, `dist/cn.js`) — les packages internes et `core` sont embarqués depuis
+la source (alias dans `build.mjs`).
+
+```bash
+export PATH=<node24>/bin:$PATH      # Node 24 validé
+cd <votre-clone-de-continue>/extensions/cli
+
+# 1) Dépendances + build des packages internes et de core (ordre géré par le script)
+npm run build:local-deps            # (~5-10 min sur un clone frais)
+
+# 2) Build du bundle (validate aliases + esbuild)
+npm run build                       # → dist/index.js + dist/cn.js (wrapper)
+
+# 3) Utilisation
+node dist/cn.js --version           # sanity check (exige les patchs : les flags
+node dist/cn.js --help              #   --mode / --tool-mode apparaissent dans --help)
+node dist/cn.js --mode chat
+node dist/cn.js --mode plan --tool-mode text
+
+# 4) (optionnel) commande `cn` globale pour la session courante
+npm link                            # crée le binaire `cn` pointant sur dist/cn.js
+```
+
+Notes :
+- `npm run build:local-deps` n'est nécessaire **qu'une fois** par clone (les `dist/`
+  des packages et de `core` persistent) ; ensuite `npm run build` suffit.
+- Sur Windows : mêmes commandes en PowerShell (`npm.cmd` via npx automatique) ;
+  pas de binaire natif à compiler (fsevents macOS et le worker JSDOM sont gérés
+  par le script).
+- Version affichée `0.0.0-dev` en local : la version définitive vient du
+  `semantic-release` de la CI.
+- Logs : `npm run watch:logs` (tail de `~/.continue/logs/cn.log`).
+
+## 7. Statut de validation
 
 - Chaîne complète exécutée avec **node v24.22.3 / npm 11.19.1** : packages → core (`tsc`) →
   gui (`tsc` + `vite build`) → extensions/vscode (`esbuild`, bundle `out/extension.js`
