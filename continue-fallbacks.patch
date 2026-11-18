@@ -1,24 +1,28 @@
-From de4c9b4d9f22f30e780a5354e15c2ac7ee599a4e Mon Sep 17 00:00:00 2001
+From 723b3971c4ee838c847930c370c565665379b731 Mon Sep 17 00:00:00 2001
 From: sam <sam@local>
 Date: Wed, 18 Nov 2026 13:25:31 +0100
-Subject: [PATCH] feat(sqlite): node-sqlite3-wasm backend - no native binding,
- no GitHub download
+Subject: [PATCH] feat(sqlite): node-sqlite3-wasm backend - the native sqlite3
+ dependency is removed
 
 core's SQLite usage (devdata, autocomplete cache, refresh index, docs)
-now goes through core/util/sqliteBackend.ts: it prefers the native
-sqlite3 driver when its binding is available and transparently falls
-back to node-sqlite3-wasm (pure WASM, installed from the npm registry)
-when it is not - the last dependency on GitHub-hosted binaries is gone.
+now goes through core/util/sqliteBackend.ts backed by
+node-sqlite3-wasm (pure WASM, installed from the npm registry) - the
+native sqlite3 driver and its GitHub-hosted binaries are no longer used
+at all. On locked corporate machines, npm install in core now completes
+with ONLY the npm registry.
 
 - openDatabase() returns a unified promise-based surface (run/get/all/
   exec/prepare/close) normalizing the raw-driver lastID onto run results
 - the raw-driver callback/serialize usage (LanceDbIndex, ChunkCodebaseIndex
-  transactions) is rewritten on the promise API so both backends work
-- sqlite3 + sqlite move to optionalDependencies: their failed install
-  scripts no longer abort npm install (the comment-json cascade)
+  transactions) is rewritten on the promise API so the WASM backend works
+- sqlite3 + sqlite removed from dependencies entirely; dbinfoz (token
+  stats, pulls sqlite3) moved to optionalDependencies: its install
+  failure is skipped too - npm install never aborts on it anymore
 - node-sqlite3-wasm added to core/cli/vscode deps; CLI bundle marks it
   external (its .wasm loads from the real module dir), vscode esbuild
   marks it external + prepackage copies it into out/node_modules
+- built-in Node search replaces the ripgrep binary dependency in the
+  VSIX (rg-shaped output); prepackage validation updated accordingly
 ---
  .../autocomplete/util/AutocompleteLruCache.ts |    9 +-
  core/data/devdataSqlite.ts                    |    6 +-
@@ -27,10 +31,10 @@ when it is not - the last dependency on GitHub-hosted binaries is gone.
  core/indexing/docs/DocsService.ts             |   11 +-
  core/indexing/docs/migrations.ts              |    4 +-
  core/indexing/refreshIndex.ts                 |   11 +-
- core/package-lock.json                        |   76 +-
+ core/package-lock.json                        |  182 +-
  core/package.json                             |    9 +-
- core/util/sqliteBackend.test.ts               |   93 +
- core/util/sqliteBackend.ts                    |  191 ++
+ core/util/sqliteBackend.test.ts               |   87 +
+ core/util/sqliteBackend.ts                    |  108 +
  extensions/cli/build.mjs                      |    1 +
  extensions/cli/package-lock.json              | 2330 +++--------------
  extensions/cli/package.json                   |    3 +-
@@ -40,7 +44,7 @@ when it is not - the last dependency on GitHub-hosted binaries is gone.
  extensions/vscode/scripts/prepackage.js       |   51 +-
  extensions/vscode/src/VsCodeIde.ts            |   74 +-
  extensions/vscode/src/util/nativeSearch.ts    |  287 ++
- 20 files changed, 1033 insertions(+), 2358 deletions(-)
+ 20 files changed, 1026 insertions(+), 2382 deletions(-)
  create mode 100644 core/util/sqliteBackend.test.ts
  create mode 100644 core/util/sqliteBackend.ts
  create mode 100644 extensions/vscode/src/util/nativeSearch.ts
@@ -366,10 +370,18 @@ index 42c4f0c8d..0723b418e 100644
  
      await SqliteDb.db.exec("PRAGMA busy_timeout = 3000;");
 diff --git a/core/package-lock.json b/core/package-lock.json
-index 7c75889e0..4e07b38e4 100644
+index 7c75889e0..05cf9f75d 100644
 --- a/core/package-lock.json
 +++ b/core/package-lock.json
-@@ -51,6 +51,7 @@
+@@ -29,7 +29,6 @@
+         "cheerio": "^1.0.0-rc.12",
+         "commander": "^12.0.0",
+         "comment-json": "^4.2.3",
+-        "dbinfoz": "^0.14.0",
+         "diff": "^8.0.3",
+         "dotenv": "^16.4.5",
+         "fastest-levenshtein": "^1.0.16",
+@@ -51,6 +50,7 @@
          "mac-ca": "^3.1.0",
          "node-fetch": "^3.3.2",
          "node-html-markdown": "^1.3.0",
@@ -377,7 +389,7 @@ index 7c75889e0..4e07b38e4 100644
          "ollama": "^0.4.6",
          "onnxruntime-node": "1.14.0",
          "openai": "^5.13.1",
-@@ -64,8 +65,6 @@
+@@ -64,8 +64,6 @@
          "replicate": "^0.26.0",
          "shell-quote": "^1.8.3",
          "socket.io-client": "^4.7.3",
@@ -386,18 +398,173 @@ index 7c75889e0..4e07b38e4 100644
          "system-ca": "^1.0.3",
          "tar": "^7.5.13",
          "tree-sitter-wasms": "^0.1.11",
-@@ -120,6 +119,10 @@
+@@ -120,6 +118,9 @@
        },
        "engines": {
          "node": ">=20.20.1"
 +      },
 +      "optionalDependencies": {
-+        "sqlite": "^5.1.1",
-+        "sqlite3": "^5.1.7"
++        "dbinfoz": "^0.14.0"
        }
      },
      "../packages/config-yaml": {
-@@ -5532,8 +5535,7 @@
+@@ -824,6 +825,7 @@
+       "resolved": "https://registry.npmjs.org/@azure-rest/core-client/-/core-client-2.6.1.tgz",
+       "integrity": "sha512-KzI10qnkWTsVS2yRBUdc8NLUJ1rOm+292mYs7Pe9wqAj/jv4bRskVm1l8XkKeVTN0OCQtrU5RG0Yhjbz1Wmg7g==",
+       "license": "MIT",
++      "optional": true,
+       "dependencies": {
+         "@azure/abort-controller": "^2.1.2",
+         "@azure/core-auth": "^1.10.0",
+@@ -841,6 +843,7 @@
+       "resolved": "https://registry.npmjs.org/@azure/abort-controller/-/abort-controller-2.1.2.tgz",
+       "integrity": "sha512-nBrLsEWm4J2u5LpAPjxADTlq3trDgVZZXHNKabeXZtpq3d3AbN/KGO82R87rdDz5/lYB024rtEf10/q0urNgsA==",
+       "license": "MIT",
++      "optional": true,
+       "dependencies": {
+         "tslib": "^2.6.2"
+       },
+@@ -853,6 +856,7 @@
+       "resolved": "https://registry.npmjs.org/@azure/core-auth/-/core-auth-1.10.1.tgz",
+       "integrity": "sha512-ykRMW8PjVAn+RS6ww5cmK9U2CyH9p4Q88YJwvUslfuMmN98w/2rdGRLPqJYObapBCdzBVeDgYWdJnFPFb7qzpg==",
+       "license": "MIT",
++      "optional": true,
+       "dependencies": {
+         "@azure/abort-controller": "^2.1.2",
+         "@azure/core-util": "^1.13.0",
+@@ -867,6 +871,7 @@
+       "resolved": "https://registry.npmjs.org/@azure/core-client/-/core-client-1.10.2.tgz",
+       "integrity": "sha512-1D2LpsU7y9xrqKjdIbsB7PlrRePw0xsVV8p+AKTlzITrWmscajryfJCdDJB/oGwvDI5HmRo04eMMADB67uwAwQ==",
+       "license": "MIT",
++      "optional": true,
+       "dependencies": {
+         "@azure/abort-controller": "^2.1.2",
+         "@azure/core-auth": "^1.10.0",
+@@ -885,6 +890,7 @@
+       "resolved": "https://registry.npmjs.org/@azure/core-http-compat/-/core-http-compat-2.4.0.tgz",
+       "integrity": "sha512-f1P96IB399YiN2ARYHP7EpZi3Bf3wH4SN2lGzrw7JVwm7bbsVYtf2iKSBwTywD2P62NOPZGHFSZi+6jjb75JuA==",
+       "license": "MIT",
++      "optional": true,
+       "dependencies": {
+         "@azure/abort-controller": "^2.1.2"
+       },
+@@ -901,6 +907,7 @@
+       "resolved": "https://registry.npmjs.org/@azure/core-lro/-/core-lro-2.7.2.tgz",
+       "integrity": "sha512-0YIpccoX8m/k00O7mDDMdJpbr6mf1yWo2dfmxt5A8XVZVVMz2SSKaEbMCeJRvgQ0IaSlqhjT47p4hVIRRy90xw==",
+       "license": "MIT",
++      "optional": true,
+       "dependencies": {
+         "@azure/abort-controller": "^2.0.0",
+         "@azure/core-util": "^1.2.0",
+@@ -916,6 +923,7 @@
+       "resolved": "https://registry.npmjs.org/@azure/core-paging/-/core-paging-1.6.2.tgz",
+       "integrity": "sha512-YKWi9YuCU04B55h25cnOYZHxXYtEvQEbKST5vqRga7hWY9ydd3FZHdeQF8pyh+acWZvppw13M/LMGx0LABUVMA==",
+       "license": "MIT",
++      "optional": true,
+       "dependencies": {
+         "tslib": "^2.6.2"
+       },
+@@ -928,6 +936,7 @@
+       "resolved": "https://registry.npmjs.org/@azure/core-rest-pipeline/-/core-rest-pipeline-1.24.0.tgz",
+       "integrity": "sha512-PpLsoDQ3AMmKZ0VU+0GrmqMxgp/sExjlVm4R+nLWngeoEGAzOIPVifaxKGU5gMv+nWELUoHfvrolWD+ZS/nFJg==",
+       "license": "MIT",
++      "optional": true,
+       "dependencies": {
+         "@azure/abort-controller": "^2.1.2",
+         "@azure/core-auth": "^1.10.0",
+@@ -946,6 +955,7 @@
+       "resolved": "https://registry.npmjs.org/@azure/core-tracing/-/core-tracing-1.3.1.tgz",
+       "integrity": "sha512-9MWKevR7Hz8kNzzPLfX4EAtGM2b8mr50HPDBvio96bURP/9C+HjdH3sBlLSNNrvRAr5/k/svoH457gB5IKpmwQ==",
+       "license": "MIT",
++      "optional": true,
+       "dependencies": {
+         "tslib": "^2.6.2"
+       },
+@@ -958,6 +968,7 @@
+       "resolved": "https://registry.npmjs.org/@azure/core-util/-/core-util-1.13.1.tgz",
+       "integrity": "sha512-XPArKLzsvl0Hf0CaGyKHUyVgF7oDnhKoP85Xv6M4StF/1AhfORhZudHtOyf2s+FcbuQ9dPRAjB8J2KvRRMUK2A==",
+       "license": "MIT",
++      "optional": true,
+       "dependencies": {
+         "@azure/abort-controller": "^2.1.2",
+         "@typespec/ts-http-runtime": "^0.3.0",
+@@ -972,6 +983,7 @@
+       "resolved": "https://registry.npmjs.org/@azure/identity/-/identity-4.13.1.tgz",
+       "integrity": "sha512-5C/2WD5Vb1lHnZS16dNQRPMjN6oV/Upba+C9nBIs15PmOi6A3ZGs4Lr2u60zw4S04gi+u3cEXiqTVP7M4Pz3kw==",
+       "license": "MIT",
++      "optional": true,
+       "dependencies": {
+         "@azure/abort-controller": "^2.0.0",
+         "@azure/core-auth": "^1.9.0",
+@@ -994,6 +1006,7 @@
+       "resolved": "https://registry.npmjs.org/@azure/keyvault-common/-/keyvault-common-2.1.0.tgz",
+       "integrity": "sha512-aCDidWuKY06LWQ4x7/8TIXK6iRqTaRWRL3t7T+LC+j1b07HtoIsOxP/tU90G4jCSBn5TAyUTCtA4MS/y5Hudaw==",
+       "license": "MIT",
++      "optional": true,
+       "dependencies": {
+         "@azure-rest/core-client": "^2.3.3",
+         "@azure/abort-controller": "^2.0.0",
+@@ -1013,6 +1026,7 @@
+       "resolved": "https://registry.npmjs.org/@azure/keyvault-keys/-/keyvault-keys-4.10.0.tgz",
+       "integrity": "sha512-eDT7iXoBTRZ2n3fLiftuGJFD+yjkiB1GNqzU2KbY1TLYeXeSPVTVgn2eJ5vmRTZ11978jy2Kg2wI7xa9Tyr8ag==",
+       "license": "MIT",
++      "optional": true,
+       "dependencies": {
+         "@azure-rest/core-client": "^2.3.3",
+         "@azure/abort-controller": "^2.1.2",
+@@ -1036,6 +1050,7 @@
+       "resolved": "https://registry.npmjs.org/@azure/logger/-/logger-1.3.0.tgz",
+       "integrity": "sha512-fCqPIfOcLE+CGqGPd66c8bZpwAji98tZ4JI9i/mlTNTlsIWslCfpg48s/ypyLxZTump5sypjrKn2/kY7q8oAbA==",
+       "license": "MIT",
++      "optional": true,
+       "dependencies": {
+         "@typespec/ts-http-runtime": "^0.3.0",
+         "tslib": "^2.6.2"
+@@ -1049,6 +1064,7 @@
+       "resolved": "https://registry.npmjs.org/@azure/msal-browser/-/msal-browser-5.12.0.tgz",
+       "integrity": "sha512-eNf2aqx1C6I0yT1GEu5ukblFrmaBXGfe1bivpmlfqvK7giPZvoXLa404C8EfeHVsy6EIryfQuPRzuW1fPxWlHg==",
+       "license": "MIT",
++      "optional": true,
+       "dependencies": {
+         "@azure/msal-common": "16.7.0"
+       },
+@@ -1061,6 +1077,7 @@
+       "resolved": "https://registry.npmjs.org/@azure/msal-common/-/msal-common-16.7.0.tgz",
+       "integrity": "sha512-Jb8Y7pX6KM42SIT7KWP6YbY3+vLbwB5b5m+tpiiOzMU1QeyelQzs9lO8jv1e7/Uj9r7tg7VjPvW4T0KB1jF3UQ==",
+       "license": "MIT",
++      "optional": true,
+       "engines": {
+         "node": ">=0.8.0"
+       }
+@@ -1070,6 +1087,7 @@
+       "resolved": "https://registry.npmjs.org/@azure/msal-node/-/msal-node-5.2.3.tgz",
+       "integrity": "sha512-YYX4TchEVddVBiybKvKhV9QO/q22jgewP+BVxKG7Uh115voPcviGlypbKERDsqQdAiSTJrwi80gcWFjYKdo8+Q==",
+       "license": "MIT",
++      "optional": true,
+       "dependencies": {
+         "@azure/msal-common": "16.7.0",
+         "jsonwebtoken": "^9.0.0"
+@@ -4330,7 +4348,8 @@
+       "version": "5.7.0",
+       "resolved": "https://registry.npmjs.org/@js-joda/core/-/core-5.7.0.tgz",
+       "integrity": "sha512-WBu4ULVVxySLLzK1Ppq+OdfP+adRS4ntmDQT915rzDJ++i95gc2jZkM5B6LWEAwN3lGXpfie3yPABozdD3K3Vg==",
+-      "license": "BSD-3-Clause"
++      "license": "BSD-3-Clause",
++      "optional": true
+     },
+     "node_modules/@lancedb/vectordb-darwin-arm64": {
+       "version": "0.4.20",
+@@ -5492,7 +5511,8 @@
+       "version": "0.5.0",
+       "resolved": "https://registry.npmjs.org/@tediousjs/connection-string/-/connection-string-0.5.0.tgz",
+       "integrity": "sha512-7qSgZbincDDDFyRweCIEvZULFAw5iz/DeunhvuxpL31nfntX3P4Yd4HkHBRg9H8CdqY1e5WFN1PZIz/REL9MVQ==",
+-      "license": "MIT"
++      "license": "MIT",
++      "optional": true
+     },
+     "node_modules/@tootallnate/once": {
+       "version": "2.0.1",
+@@ -5532,8 +5552,7 @@
        "license": "MIT",
        "dependencies": {
          "@babel/types": "^7.0.0"
@@ -407,7 +574,7 @@ index 7c75889e0..4e07b38e4 100644
      },
      "node_modules/@types/babel__template": {
        "version": "7.4.4",
-@@ -5554,8 +5556,7 @@
+@@ -5554,8 +5573,7 @@
        "license": "MIT",
        "dependencies": {
          "@babel/types": "^7.28.2"
@@ -417,7 +584,7 @@ index 7c75889e0..4e07b38e4 100644
      },
      "node_modules/@types/caseless": {
        "version": "0.12.5",
-@@ -5573,8 +5574,7 @@
+@@ -5573,8 +5591,7 @@
        "dependencies": {
          "@types/deep-eql": "*",
          "assertion-error": "^2.0.1"
@@ -427,7 +594,7 @@ index 7c75889e0..4e07b38e4 100644
      },
      "node_modules/@types/command-line-args": {
        "version": "5.2.0",
-@@ -5602,16 +5602,14 @@
+@@ -5602,16 +5619,14 @@
        "resolved": "https://registry.npmjs.org/@types/diff/-/diff-7.0.2.tgz",
        "integrity": "sha512-JSWRMozjFKsGlEjiiKajUjIJVKuKdE3oVy2DNtK+fUo8q82nhFZ2CPQwicAIkXrofahDXrWJ7mjelvZphMS98Q==",
        "dev": true,
@@ -446,7 +613,7 @@ index 7c75889e0..4e07b38e4 100644
      },
      "node_modules/@types/follow-redirects": {
        "version": "1.14.4",
-@@ -5679,8 +5677,7 @@
+@@ -5679,8 +5694,7 @@
        "dependencies": {
          "expect": "^29.0.0",
          "pretty-format": "^29.0.0"
@@ -456,7 +623,7 @@ index 7c75889e0..4e07b38e4 100644
      },
      "node_modules/@types/jquery": {
        "version": "3.5.34",
-@@ -5690,8 +5687,7 @@
+@@ -5690,8 +5704,7 @@
        "license": "MIT",
        "dependencies": {
          "@types/sizzle": "*"
@@ -466,7 +633,7 @@ index 7c75889e0..4e07b38e4 100644
      },
      "node_modules/@types/jsdom": {
        "version": "21.1.7",
-@@ -5747,8 +5743,7 @@
+@@ -5747,8 +5760,7 @@
        "resolved": "https://registry.npmjs.org/@types/mustache/-/mustache-4.2.6.tgz",
        "integrity": "sha512-t+8/QWTAhOFlrF1IVZqKnMRJi84EgkIK5Kh0p2JV4OLywUvCwJPFxbJAl7XAow7DVIHsF+xW9f1MVzg0L6Szjw==",
        "dev": true,
@@ -476,7 +643,7 @@ index 7c75889e0..4e07b38e4 100644
      },
      "node_modules/@types/node": {
        "version": "25.9.2",
-@@ -5757,8 +5752,7 @@
+@@ -5757,8 +5769,7 @@
        "license": "MIT",
        "dependencies": {
          "undici-types": ">=7.24.0 <7.24.7"
@@ -486,7 +653,7 @@ index 7c75889e0..4e07b38e4 100644
      },
      "node_modules/@types/node-fetch": {
        "version": "2.6.13",
-@@ -5769,8 +5763,7 @@
+@@ -5769,8 +5780,7 @@
        "dependencies": {
          "@types/node": "*",
          "form-data": "^4.0.4"
@@ -496,7 +663,7 @@ index 7c75889e0..4e07b38e4 100644
      },
      "node_modules/@types/node-forge": {
        "version": "1.3.14",
-@@ -5780,8 +5773,7 @@
+@@ -5780,8 +5790,7 @@
        "license": "MIT",
        "dependencies": {
          "@types/node": "*"
@@ -506,7 +673,7 @@ index 7c75889e0..4e07b38e4 100644
      },
      "node_modules/@types/pad-left": {
        "version": "2.1.1",
-@@ -5800,8 +5792,7 @@
+@@ -5800,8 +5809,7 @@
          "@types/node": "*",
          "pg-protocol": "*",
          "pg-types": "^2.2.0"
@@ -516,8 +683,11 @@ index 7c75889e0..4e07b38e4 100644
      },
      "node_modules/@types/plist": {
        "version": "3.0.5",
-@@ -5821,8 +5812,7 @@
+@@ -5819,10 +5827,10 @@
+       "resolved": "https://registry.npmjs.org/@types/readable-stream/-/readable-stream-4.0.23.tgz",
+       "integrity": "sha512-wwXrtQvbMHxCbBgjHaMGEmImFTQxxpfMOR/ZoQnXxB1woqkUbdLGFDgauo00Py9IudiaqSeiBiulSV9i6XIPig==",
        "license": "MIT",
++      "optional": true,
        "dependencies": {
          "@types/node": "*"
 -      },
@@ -526,7 +696,7 @@ index 7c75889e0..4e07b38e4 100644
      },
      "node_modules/@types/request": {
        "version": "2.48.13",
-@@ -5835,8 +5825,7 @@
+@@ -5835,8 +5843,7 @@
          "@types/node": "*",
          "@types/tough-cookie": "*",
          "form-data": "^2.5.5"
@@ -536,7 +706,7 @@ index 7c75889e0..4e07b38e4 100644
      },
      "node_modules/@types/request/node_modules/form-data": {
        "version": "2.5.5",
-@@ -5891,8 +5880,7 @@
+@@ -5891,8 +5898,7 @@
        "resolved": "https://registry.npmjs.org/@types/sizzle/-/sizzle-2.3.10.tgz",
        "integrity": "sha512-TC0dmN0K8YcWEAEfiPi5gJP14eJe30TTGjkvek3iM/1NdHHsdCA/Td6GvNndMOo/iSnIsZ4HuuhrYPDAmbxzww==",
        "dev": true,
@@ -546,7 +716,7 @@ index 7c75889e0..4e07b38e4 100644
      },
      "node_modules/@types/stack-utils": {
        "version": "2.0.3",
-@@ -5958,8 +5946,7 @@
+@@ -5958,8 +5964,7 @@
        "license": "MIT",
        "dependencies": {
          "@types/yargs-parser": "*"
@@ -556,7 +726,55 @@ index 7c75889e0..4e07b38e4 100644
      },
      "node_modules/@types/yargs-parser": {
        "version": "21.0.3",
-@@ -7459,8 +7446,7 @@
+@@ -6229,6 +6234,7 @@
+       "resolved": "https://registry.npmjs.org/@typespec/ts-http-runtime/-/ts-http-runtime-0.3.6.tgz",
+       "integrity": "sha512-jIXhD0eWQ1JA6ln/5Dltyx22UxWNrw0hZmhy2rlv6m6KgF7kplHx3g0fzi09lNmTJQRR91OlemYp3xFnvDK9og==",
+       "license": "MIT",
++      "optional": true,
+       "dependencies": {
+         "http-proxy-agent": "^7.0.0",
+         "https-proxy-agent": "^7.0.0",
+@@ -6408,6 +6414,7 @@
+       "resolved": "https://registry.npmjs.org/abort-controller/-/abort-controller-3.0.0.tgz",
+       "integrity": "sha512-h8lQ8tacZYnR3vNQTgibj+tODHI5/+l06Au2Pcriv/Gmet0eaj4TwWH41sO9wnHDiQsEj19q0drzdWdeAHtweg==",
+       "license": "MIT",
++      "optional": true,
+       "dependencies": {
+         "event-target-shim": "^5.0.0"
+       },
+@@ -6901,6 +6908,7 @@
+       "resolved": "https://registry.npmjs.org/aws-ssl-profiles/-/aws-ssl-profiles-1.1.2.tgz",
+       "integrity": "sha512-NZKeq9AfyQvEeNlN0zSYAaWrmBffJh3IELMZfRpJVWgrpEbtEpnjvzqBPf+mxoI287JohRDoa+/nsfqqiZmF6g==",
+       "license": "MIT",
++      "optional": true,
+       "engines": {
+         "node": ">= 6.0.0"
+       }
+@@ -7277,6 +7285,7 @@
+       "resolved": "https://registry.npmjs.org/bindings/-/bindings-1.5.0.tgz",
+       "integrity": "sha512-p2q/t/mhvuOj/UeLlV6566GD/guowlr0hHxClI0W9m7MWYkL1F0hLo+0Aexs9HSPCtR1SXQ0TD3MMKrXZajbiQ==",
+       "license": "MIT",
++      "optional": true,
+       "dependencies": {
+         "file-uri-to-path": "1.0.0"
+       }
+@@ -7286,6 +7295,7 @@
+       "resolved": "https://registry.npmjs.org/bl/-/bl-6.1.6.tgz",
+       "integrity": "sha512-jLsPgN/YSvPUg9UX0Kd73CXpm2Psg9FxMeCSXnk3WBO3CMT10JMwijubhGfHCnFu6TPn1ei3b975dxv7K2pWVg==",
+       "license": "MIT",
++      "optional": true,
+       "dependencies": {
+         "@types/readable-stream": "^4.0.0",
+         "buffer": "^6.0.3",
+@@ -7447,6 +7457,7 @@
+         }
+       ],
+       "license": "MIT",
++      "optional": true,
+       "dependencies": {
+         "base64-js": "^1.3.1",
+         "ieee754": "^1.2.1"
+@@ -7459,8 +7470,7 @@
        "license": "MIT",
        "engines": {
          "node": "*"
@@ -566,7 +784,269 @@ index 7c75889e0..4e07b38e4 100644
      },
      "node_modules/buffer-equal-constant-time": {
        "version": "1.0.1",
-@@ -14212,6 +14198,12 @@
+@@ -7480,6 +7490,7 @@
+       "resolved": "https://registry.npmjs.org/bundle-name/-/bundle-name-4.1.0.tgz",
+       "integrity": "sha512-tjwM5exMg6BGRI+kNmTntNsvdZS1X8BFYS6tnJ2hdH0kVxM6/eVZ2xy+FqStSWvYmtfFMDLIxurorHwDKfDz5Q==",
+       "license": "MIT",
++      "optional": true,
+       "dependencies": {
+         "run-applescript": "^7.0.0"
+       },
+@@ -8343,6 +8354,7 @@
+       "resolved": "https://registry.npmjs.org/dbinfoz/-/dbinfoz-0.14.0.tgz",
+       "integrity": "sha512-8NLjmj3gEyxbMu1ZwPEby77QvoEkk5NrHKSwX4oSKeaREherwuSx1y08cXmxBEjrSmvByUX9axoKscuilSXfmg==",
+       "license": "MIT",
++      "optional": true,
+       "dependencies": {
+         "mssql": "^11.0.1",
+         "mysql2": "^3.9.1",
+@@ -8443,6 +8455,7 @@
+       "resolved": "https://registry.npmjs.org/default-browser/-/default-browser-5.5.0.tgz",
+       "integrity": "sha512-H9LMLr5zwIbSxrmvikGuI/5KGhZ8E2zH3stkMgM5LpOWDutGM2JZaj460Udnf1a+946zc7YBgrqEWwbk7zHvGw==",
+       "license": "MIT",
++      "optional": true,
+       "dependencies": {
+         "bundle-name": "^4.1.0",
+         "default-browser-id": "^5.0.0"
+@@ -8459,6 +8472,7 @@
+       "resolved": "https://registry.npmjs.org/default-browser-id/-/default-browser-id-5.0.1.tgz",
+       "integrity": "sha512-x1VCxdX4t+8wVfd1so/9w+vQ4vx7lKd2Qp5tDRutErwmR85OgmfX7RlLRMWafRMY7hbEiXIbudNrjOAPa/hL8Q==",
+       "license": "MIT",
++      "optional": true,
+       "engines": {
+         "node": ">=18"
+       },
+@@ -8488,6 +8502,7 @@
+       "resolved": "https://registry.npmjs.org/define-lazy-prop/-/define-lazy-prop-3.0.0.tgz",
+       "integrity": "sha512-N+MeXYoqr3pOgn8xfyRPREN7gHakLYjhsHhWGT3fWAiL4IkAt0iDw14QiiEm2bE30c5XX5q0FtAA3CK5f9/BUg==",
+       "license": "MIT",
++      "optional": true,
+       "engines": {
+         "node": ">=12"
+       },
+@@ -8547,6 +8562,7 @@
+       "resolved": "https://registry.npmjs.org/denque/-/denque-2.1.0.tgz",
+       "integrity": "sha512-HVQE3AAb/pxF8fQAoiqpvg9i3evqug3hoiwakOyZAwJm+6vZehbkYXZ0l4JxS+I3QxM97v5aaRNhj8v5oBhekw==",
+       "license": "Apache-2.0",
++      "optional": true,
+       "engines": {
+         "node": ">=0.10"
+       }
+@@ -9590,6 +9606,7 @@
+       "resolved": "https://registry.npmjs.org/event-target-shim/-/event-target-shim-5.0.1.tgz",
+       "integrity": "sha512-i/2XbnSz/uxRCU6+NdVJgKWDTM427+MqYbkQzD321DuCQJUqOuJKIA0IM2+W2xtYHdKOmZ4dR6fExsd4SXL+WQ==",
+       "license": "MIT",
++      "optional": true,
+       "engines": {
+         "node": ">=6"
+       }
+@@ -9963,7 +9980,8 @@
+       "version": "1.0.0",
+       "resolved": "https://registry.npmjs.org/file-uri-to-path/-/file-uri-to-path-1.0.0.tgz",
+       "integrity": "sha512-0Zt+s3L7Vf1biwWZ29aARiVYLx7iMGnEUl9x33fbB/j3jR81u/O2LbqK+Bm1CDSNDKVtJ/YjwY7TUd5SkeLQLw==",
+-      "license": "MIT"
++      "license": "MIT",
++      "optional": true
+     },
+     "node_modules/fill-range": {
+       "version": "7.1.1",
+@@ -10328,6 +10346,7 @@
+       "resolved": "https://registry.npmjs.org/generate-function/-/generate-function-2.3.1.tgz",
+       "integrity": "sha512-eeB5GfMNeevm/GRYq20ShmsaGcmI81kIX2K9XQx5miC8KdHaC6Jm0qQ8ZNeGOi7wYB8OsdxKs+Y2oVuTFuVwKQ==",
+       "license": "MIT",
++      "optional": true,
+       "dependencies": {
+         "is-property": "^1.0.2"
+       }
+@@ -11300,6 +11319,7 @@
+       "resolved": "https://registry.npmjs.org/is-docker/-/is-docker-3.0.0.tgz",
+       "integrity": "sha512-eljcgEDlEns/7AXFosB5K/2nCM4P7FQPkGc/DWLy5rmFEWvZayGrik1d9/QIY5nJ4f9YsVvBkA6kJpHn9rISdQ==",
+       "license": "MIT",
++      "optional": true,
+       "bin": {
+         "is-docker": "cli.js"
+       },
+@@ -11397,6 +11417,7 @@
+       "resolved": "https://registry.npmjs.org/is-inside-container/-/is-inside-container-1.0.0.tgz",
+       "integrity": "sha512-KIYLCCJghfHZxqjYBE7rEy0OBuTd5xCHS7tHVgvCLkx7StIoaxwNW3hCALgEUjFfeRk+MG/Qxmp/vtETEF3tRA==",
+       "license": "MIT",
++      "optional": true,
+       "dependencies": {
+         "is-docker": "^3.0.0"
+       },
+@@ -11504,7 +11525,8 @@
+       "version": "1.0.2",
+       "resolved": "https://registry.npmjs.org/is-property/-/is-property-1.0.2.tgz",
+       "integrity": "sha512-Ks/IoX00TtClbGQr4TWXemAnktAQvYB7HzcCxDGqEZU6oCmb2INHuOoKxbtR+HFkmYWBKv/dOZtGRiAjDhj92g==",
+-      "license": "MIT"
++      "license": "MIT",
++      "optional": true
+     },
+     "node_modules/is-regex": {
+       "version": "1.2.1",
+@@ -11668,6 +11690,7 @@
+       "resolved": "https://registry.npmjs.org/is-wsl/-/is-wsl-3.1.1.tgz",
+       "integrity": "sha512-e6rvdUCiQCAuumZslxRJWR/Doq4VpPR82kqclvcS0efgt430SlGIk05vdCN58+VrzgtIcfNODjozVielycD4Sw==",
+       "license": "MIT",
++      "optional": true,
+       "dependencies": {
+         "is-inside-container": "^1.0.0"
+       },
+@@ -12730,7 +12753,8 @@
+       "version": "0.3.2",
+       "resolved": "https://registry.npmjs.org/js-md4/-/js-md4-0.3.2.tgz",
+       "integrity": "sha512-/GDnfQYsltsjRswQhN9fhv3EMw2sCpUdrdxyWDOUK7eyD++r3gRhzgiQgc/x4MAv2i1iuQ4lxO5mvqM3vj4bwA==",
+-      "license": "MIT"
++      "license": "MIT",
++      "optional": true
+     },
+     "node_modules/js-tiktoken": {
+       "version": "1.0.21",
+@@ -12888,6 +12912,7 @@
+       "resolved": "https://registry.npmjs.org/jsonwebtoken/-/jsonwebtoken-9.0.3.tgz",
+       "integrity": "sha512-MT/xP0CrubFRNLNKvxJ2BYfy53Zkm++5bX9dtuPbqAeQpTVe0MQTFhao8+Cp//EmJp244xt6Drw/GVEGCUj40g==",
+       "license": "MIT",
++      "optional": true,
+       "dependencies": {
+         "jws": "^4.0.1",
+         "lodash.includes": "^4.3.0",
+@@ -12910,6 +12935,7 @@
+       "resolved": "https://registry.npmjs.org/semver/-/semver-7.8.2.tgz",
+       "integrity": "sha512-c8jsqUZm3omBOI66G90z1Dyw5z622G8oLG+omfsHBJf3CWQTlOcwOjvOG6wtiNfW6anKm/eA39LMwMtMez2TiQ==",
+       "license": "ISC",
++      "optional": true,
+       "bin": {
+         "semver": "bin/semver.js"
+       },
+@@ -13083,37 +13109,43 @@
+       "version": "4.3.0",
+       "resolved": "https://registry.npmjs.org/lodash.includes/-/lodash.includes-4.3.0.tgz",
+       "integrity": "sha512-W3Bx6mdkRTGtlJISOvVD/lbqjTlPPUDTMnlXZFnVwi9NKJ6tiAk6LVdlhZMm17VZisqhKcgzpO5Wz91PCt5b0w==",
+-      "license": "MIT"
++      "license": "MIT",
++      "optional": true
+     },
+     "node_modules/lodash.isboolean": {
+       "version": "3.0.3",
+       "resolved": "https://registry.npmjs.org/lodash.isboolean/-/lodash.isboolean-3.0.3.tgz",
+       "integrity": "sha512-Bz5mupy2SVbPHURB98VAcw+aHh4vRV5IPNhILUCsOzRmsTmSQ17jIuqopAentWoehktxGd9e/hbIXq980/1QJg==",
+-      "license": "MIT"
++      "license": "MIT",
++      "optional": true
+     },
+     "node_modules/lodash.isinteger": {
+       "version": "4.0.4",
+       "resolved": "https://registry.npmjs.org/lodash.isinteger/-/lodash.isinteger-4.0.4.tgz",
+       "integrity": "sha512-DBwtEWN2caHQ9/imiNeEA5ys1JoRtRfY3d7V9wkqtbycnAmTvRRmbHKDV4a0EYc678/dia0jrte4tjYwVBaZUA==",
+-      "license": "MIT"
++      "license": "MIT",
++      "optional": true
+     },
+     "node_modules/lodash.isnumber": {
+       "version": "3.0.3",
+       "resolved": "https://registry.npmjs.org/lodash.isnumber/-/lodash.isnumber-3.0.3.tgz",
+       "integrity": "sha512-QYqzpfwO3/CWf3XP+Z+tkQsfaLL/EnUlXWVkIk5FUPc4sBdTehEqZONuyRt2P67PXAk+NXmTBcc97zw9t1FQrw==",
+-      "license": "MIT"
++      "license": "MIT",
++      "optional": true
+     },
+     "node_modules/lodash.isplainobject": {
+       "version": "4.0.6",
+       "resolved": "https://registry.npmjs.org/lodash.isplainobject/-/lodash.isplainobject-4.0.6.tgz",
+       "integrity": "sha512-oSXzaWypCMHkPC3NvBEaPHf0KsA5mvPrOPgQWDsbg8n7orZ290M0BmC/jgRZ4vcJ6DTAhjrsSYgdsW/F+MFOBA==",
+-      "license": "MIT"
++      "license": "MIT",
++      "optional": true
+     },
+     "node_modules/lodash.isstring": {
+       "version": "4.0.1",
+       "resolved": "https://registry.npmjs.org/lodash.isstring/-/lodash.isstring-4.0.1.tgz",
+       "integrity": "sha512-0wJxfxH1wgO3GrbuP+dTTk7op+6L41QCXbGINEmD+ny/G/eCqGzxyCsh7159S+mgDDcoarnBw6PC1PS5+wUGgw==",
+-      "license": "MIT"
++      "license": "MIT",
++      "optional": true
+     },
+     "node_modules/lodash.memoize": {
+       "version": "4.1.2",
+@@ -13132,7 +13164,8 @@
+       "version": "4.1.1",
+       "resolved": "https://registry.npmjs.org/lodash.once/-/lodash.once-4.1.1.tgz",
+       "integrity": "sha512-Sb487aTOCr9drQVL8pIxOzVhafOjZN9UU54hiN8PU3uAiSV7lx1yYNpbNmex2PK6dSJoNTSJUUswT651yww3Mg==",
+-      "license": "MIT"
++      "license": "MIT",
++      "optional": true
+     },
+     "node_modules/logform": {
+       "version": "2.7.0",
+@@ -13155,7 +13188,8 @@
+       "version": "5.3.2",
+       "resolved": "https://registry.npmjs.org/long/-/long-5.3.2.tgz",
+       "integrity": "sha512-mNAgZ1GmyNhD7AuqnTG3/VQ26o760+ZYBPKjPvugO8+nLbYfX6TVpJPseBvopbdY+qpZ/lKUnmEc1LeZYS3QAA==",
+-      "license": "Apache-2.0"
++      "license": "Apache-2.0",
++      "optional": true
+     },
+     "node_modules/loupe": {
+       "version": "3.2.1",
+@@ -13178,6 +13212,7 @@
+       "resolved": "https://registry.npmjs.org/lru.min/-/lru.min-1.1.4.tgz",
+       "integrity": "sha512-DqC6n3QQ77zdFpCMASA1a3Jlb64Hv2N2DciFGkO/4L9+q/IpIAuRlKOvCXabtRW6cQf8usbmM6BE/TOPysCdIA==",
+       "license": "MIT",
++      "optional": true,
+       "engines": {
+         "bun": ">=1.0.0",
+         "deno": ">=1.30.0",
+@@ -13872,6 +13907,7 @@
+       "resolved": "https://registry.npmjs.org/mssql/-/mssql-11.0.1.tgz",
+       "integrity": "sha512-KlGNsugoT90enKlR8/G36H0kTxPthDhmtNUCwEHvgRza5Cjpjoj+P2X6eMpFUDN7pFrJZsKadL4x990G8RBE1w==",
+       "license": "MIT",
++      "optional": true,
+       "dependencies": {
+         "@tediousjs/connection-string": "^0.5.0",
+         "commander": "^11.0.0",
+@@ -13892,6 +13928,7 @@
+       "resolved": "https://registry.npmjs.org/commander/-/commander-11.1.0.tgz",
+       "integrity": "sha512-yPVavfyCcRhmorC7rWlkHn15b4wDVgVmBA7kV4QVBsF7kv/9TKJAbAXVTxvTnwP8HHKjRCJDClKbciiYS7p0DQ==",
+       "license": "MIT",
++      "optional": true,
+       "engines": {
+         "node": ">=16"
+       }
+@@ -13911,6 +13948,7 @@
+       "resolved": "https://registry.npmjs.org/mysql2/-/mysql2-3.22.5.tgz",
+       "integrity": "sha512-95uZ2TrPWAZdwpB3vvvDbmEMcNG8yIeNCyu6GUcr/QnWEE/wXm7+mhOCsdQfWQDTV7qYT/PDUZ4U4UPP4AsXqQ==",
+       "license": "MIT",
++      "optional": true,
+       "dependencies": {
+         "aws-ssl-profiles": "^1.1.2",
+         "denque": "^2.1.0",
+@@ -13933,6 +13971,7 @@
+       "resolved": "https://registry.npmjs.org/iconv-lite/-/iconv-lite-0.7.2.tgz",
+       "integrity": "sha512-im9DjEDQ55s9fL4EYzOAv0yMqmMBSZp6G0VvFyTMPKWxiSBHUj9NW/qqLmXUwXrrM7AvqSlTCfvqRb0cM8yYqw==",
+       "license": "MIT",
++      "optional": true,
+       "dependencies": {
+         "safer-buffer": ">= 2.1.2 < 3.0.0"
+       },
+@@ -13949,6 +13988,7 @@
+       "resolved": "https://registry.npmjs.org/named-placeholders/-/named-placeholders-1.1.6.tgz",
+       "integrity": "sha512-Tz09sEL2EEuv5fFowm419c1+a/jSMiBjI9gHxVLrVdbUkkNUUfjsVYs9pVZu5oCon/kmRh9TfLEObFtkVxmY0w==",
+       "license": "MIT",
++      "optional": true,
+       "dependencies": {
+         "lru.min": "^1.1.0"
+       },
+@@ -13985,7 +14025,8 @@
+       "version": "1.0.0",
+       "resolved": "https://registry.npmjs.org/native-duplexpair/-/native-duplexpair-1.0.0.tgz",
+       "integrity": "sha512-E7QQoM+3jvNtlmyfqRZ0/U75VFgCls+fSkbml2MpgWkWyz3ox8Y58gNhfuziuQYGNNQAbFZJQck55LHCnCK6CA==",
+-      "license": "MIT"
++      "license": "MIT",
++      "optional": true
+     },
+     "node_modules/natural-compare": {
+       "version": "1.4.0",
+@@ -14212,6 +14253,12 @@
          "node": ">=18"
        }
      },
@@ -579,7 +1059,49 @@ index 7c75889e0..4e07b38e4 100644
      "node_modules/nopt": {
        "version": "5.0.0",
        "resolved": "https://registry.npmjs.org/nopt/-/nopt-5.0.0.tgz",
-@@ -16844,8 +16836,7 @@
+@@ -14565,6 +14612,7 @@
+       "resolved": "https://registry.npmjs.org/open/-/open-10.2.0.tgz",
+       "integrity": "sha512-YgBpdJHPyQ2UE5x+hlSXcnejzAvD0b22U2OuAP+8OnlJT+PjWPxtgmGqKKc+RgTM63U9gN0YzrYc71R2WT/hTA==",
+       "license": "MIT",
++      "optional": true,
+       "dependencies": {
+         "default-browser": "^5.2.1",
+         "define-lazy-prop": "^3.0.0",
+@@ -15401,6 +15449,7 @@
+       "resolved": "https://registry.npmjs.org/process/-/process-0.11.10.tgz",
+       "integrity": "sha512-cdGef/drWFoydD1JsMzuFf8100nZl+GT+yacc2bEced5f9Rjk4z+WtFUTBu9PhOi9j/jfmBPu0mMEY4wIdAF8A==",
+       "license": "MIT",
++      "optional": true,
+       "engines": {
+         "node": ">= 0.6.0"
+       }
+@@ -15856,6 +15905,7 @@
+       "resolved": "https://registry.npmjs.org/readable-stream/-/readable-stream-4.7.0.tgz",
+       "integrity": "sha512-oIGGmcpTLwPga8Bn6/Z75SVaH1z5dUut2ibSyAMVhmUggWpmDn2dapB0n7f8nwaSiRtepAsfJyfXIO5DCVAODg==",
+       "license": "MIT",
++      "optional": true,
+       "dependencies": {
+         "abort-controller": "^3.0.0",
+         "buffer": "^6.0.3",
+@@ -16133,7 +16183,8 @@
+       "version": "1.4.1",
+       "resolved": "https://registry.npmjs.org/rfdc/-/rfdc-1.4.1.tgz",
+       "integrity": "sha512-q1b3N5QkRUWUl7iyylaaj3kOpIT0N2i9MqIEQXP73GVsN9cw3fdx8X63cEmWhJGi2PPCF23Ijp7ktmd39rawIA==",
+-      "license": "MIT"
++      "license": "MIT",
++      "optional": true
+     },
+     "node_modules/rimraf": {
+       "version": "3.0.2",
+@@ -16223,6 +16274,7 @@
+       "resolved": "https://registry.npmjs.org/run-applescript/-/run-applescript-7.1.0.tgz",
+       "integrity": "sha512-DPe5pVFaAsinSaV6QjQ6gdiedWDcRCbUuiQfQa2wmWV7+xC9bGulGI8+TdRmoFkAPaBXk8CrAbnlY2ISniJ47Q==",
+       "license": "MIT",
++      "optional": true,
+       "engines": {
+         "node": ">=18"
+       },
+@@ -16844,8 +16896,7 @@
        },
        "engines": {
          "node": "*"
@@ -589,17 +1111,70 @@ index 7c75889e0..4e07b38e4 100644
      },
      "node_modules/split2": {
        "version": "4.2.0",
-@@ -16881,7 +16872,8 @@
-       "version": "5.1.1",
-       "resolved": "https://registry.npmjs.org/sqlite/-/sqlite-5.1.1.tgz",
-       "integrity": "sha512-oBkezXa2hnkfuJwUo44Hl9hS3er+YFtueifoajrgidvqsJRQFpc5fKoAkAor1O5ZnLoa28GBScfHXs8j0K358Q==",
+@@ -16860,13 +16911,15 @@
+       "version": "1.1.3",
+       "resolved": "https://registry.npmjs.org/sprintf-js/-/sprintf-js-1.1.3.tgz",
+       "integrity": "sha512-Oo+0REFV59/rz3gfJNKQiBlwfHaSESl1pcGyABQsnnIfWOFt6JNj5gCog2U6MLZ//IGYD+nA8nI+mTShREReaA==",
+-      "license": "BSD-3-Clause"
++      "license": "BSD-3-Clause",
++      "optional": true
+     },
+     "node_modules/sql-escaper": {
+       "version": "1.3.3",
+       "resolved": "https://registry.npmjs.org/sql-escaper/-/sql-escaper-1.3.3.tgz",
+       "integrity": "sha512-BsTCV265VpTp8tm1wyIm1xqQCS+Q9NHx2Sr+WcnUrgLrQ6yiDIvHYJV5gHxsj1lMBy2zm5twLaZao8Jd+S8JJw==",
+       "license": "MIT",
++      "optional": true,
+       "engines": {
+         "bun": ">=1.0.0",
+         "deno": ">=2.0.0",
+@@ -16877,18 +16930,13 @@
+         "url": "https://github.com/mysqljs/sql-escaper?sponsor=1"
+       }
+     },
+-    "node_modules/sqlite": {
+-      "version": "5.1.1",
+-      "resolved": "https://registry.npmjs.org/sqlite/-/sqlite-5.1.1.tgz",
+-      "integrity": "sha512-oBkezXa2hnkfuJwUo44Hl9hS3er+YFtueifoajrgidvqsJRQFpc5fKoAkAor1O5ZnLoa28GBScfHXs8j0K358Q==",
+-      "license": "MIT"
+-    },
+     "node_modules/sqlite3": {
+       "version": "5.1.7",
+       "resolved": "https://registry.npmjs.org/sqlite3/-/sqlite3-5.1.7.tgz",
+       "integrity": "sha512-GGIyOiFaG+TUra3JIfkI/zGP8yZYLPQ0pl1bH+ODjiX57sPhrLU5sQJn1y9bDKZUFYkX1crlrPfSYt0BKKdkog==",
+       "hasInstallScript": true,
+       "license": "BSD-3-Clause",
++      "optional": true,
+       "dependencies": {
+         "bindings": "^1.5.0",
+         "node-addon-api": "^7.0.0",
+@@ -16911,7 +16959,8 @@
+       "version": "7.1.1",
+       "resolved": "https://registry.npmjs.org/node-addon-api/-/node-addon-api-7.1.1.tgz",
+       "integrity": "sha512-5m3bsyrjFWE1xf7nz7YXdN4udnVtXK6/Yfgn5qnahL6bCkf2yKt4k3nuTKAtT4r3IG8JNR2ncsIMdZuAzJjHQQ==",
 -      "license": "MIT"
 +      "license": "MIT",
 +      "optional": true
      },
-     "node_modules/sqlite3": {
-       "version": "5.1.7",
-@@ -17813,8 +17805,7 @@
+     "node_modules/ssri": {
+       "version": "8.0.1",
+@@ -17385,6 +17434,7 @@
+       "resolved": "https://registry.npmjs.org/tarn/-/tarn-3.0.2.tgz",
+       "integrity": "sha512-51LAVKUSZSVfI05vjPESNc5vwqqZpbXCsU+/+wxlOrUjk2SnFTt97v9ZgQrD4YmxYW1Px6w2KjaDitCfkvgxMQ==",
+       "license": "MIT",
++      "optional": true,
+       "engines": {
+         "node": ">=8.0.0"
+       }
+@@ -17394,6 +17444,7 @@
+       "resolved": "https://registry.npmjs.org/tedious/-/tedious-18.6.2.tgz",
+       "integrity": "sha512-g7jC56o3MzLkE3lHkaFe2ZdOVFBahq5bsB60/M4NYUbocw/MCrS89IOEQUFr+ba6pb8ZHczZ/VqCyYeYq0xBAg==",
+       "license": "MIT",
++      "optional": true,
+       "dependencies": {
+         "@azure/core-auth": "^1.7.2",
+         "@azure/identity": "^4.2.1",
+@@ -17813,8 +17864,7 @@
        },
        "engines": {
          "node": "*"
@@ -609,7 +1184,7 @@ index 7c75889e0..4e07b38e4 100644
      },
      "node_modules/type-check": {
        "version": "0.4.0",
-@@ -19366,8 +19357,7 @@
+@@ -19366,8 +19416,7 @@
        "resolved": "https://registry.npmjs.org/node-addon-api/-/node-addon-api-3.2.1.tgz",
        "integrity": "sha512-mmcei9JghVNDYydghQmeDX8KoAm0FAiYyIcUt/N4nhyAipB17pllZQDOJD2fotxABnt4Mdz+dKTO7eftLg4d0A==",
        "license": "MIT",
@@ -619,11 +1194,27 @@ index 7c75889e0..4e07b38e4 100644
      },
      "node_modules/wink-distance": {
        "version": "2.0.2",
+@@ -19599,6 +19648,7 @@
+       "resolved": "https://registry.npmjs.org/wsl-utils/-/wsl-utils-0.1.0.tgz",
+       "integrity": "sha512-h3Fbisa2nKGPxCpm89Hk33lBLsnaGBvctQopaBSOW/uIs6FTe1ATyAnKFJrzVs9vpGdsTe73WF3V4lIsk4Gacw==",
+       "license": "MIT",
++      "optional": true,
+       "dependencies": {
+         "is-wsl": "^3.1.0"
+       },
 diff --git a/core/package.json b/core/package.json
-index b8441cc33..176f6ef02 100644
+index b8441cc33..0fa065d6a 100644
 --- a/core/package.json
 +++ b/core/package.json
-@@ -109,8 +109,6 @@
+@@ -74,7 +74,6 @@
+     "cheerio": "^1.0.0-rc.12",
+     "commander": "^12.0.0",
+     "comment-json": "^4.2.3",
+-    "dbinfoz": "^0.14.0",
+     "diff": "^8.0.3",
+     "dotenv": "^16.4.5",
+     "fastest-levenshtein": "^1.0.16",
+@@ -109,8 +108,6 @@
      "replicate": "^0.26.0",
      "shell-quote": "^1.8.3",
      "socket.io-client": "^4.7.3",
@@ -632,7 +1223,7 @@ index b8441cc33..176f6ef02 100644
      "system-ca": "^1.0.3",
      "tar": "^7.5.13",
      "tree-sitter-wasms": "^0.1.11",
-@@ -123,7 +121,8 @@
+@@ -123,7 +120,8 @@
      "winston": "^3.17.0",
      "workerpool": "^9.1.3",
      "yaml": "^2.4.2",
@@ -642,25 +1233,23 @@ index b8441cc33..176f6ef02 100644
    },
    "engine-strict": true,
    "engines": {
-@@ -131,5 +130,9 @@
+@@ -131,5 +129,8 @@
    },
    "overrides": {
      "tar": "^7.5.13"
 +  },
 +  "optionalDependencies": {
-+    "sqlite3": "^5.1.7",
-+    "sqlite": "^5.1.1"
++    "dbinfoz": "^0.14.0"
    }
  }
 diff --git a/core/util/sqliteBackend.test.ts b/core/util/sqliteBackend.test.ts
 new file mode 100644
-index 000000000..4f36d829b
+index 000000000..2216ee6ca
 --- /dev/null
 +++ b/core/util/sqliteBackend.test.ts
-@@ -0,0 +1,93 @@
+@@ -0,0 +1,87 @@
 +/**
-+ * Tests for the unified SQLite backend: both the native path (when the
-+ * binding is available) and the WASM fallback must expose the same surface.
++ * Tests for the unified SQLite backend (node-sqlite3-wasm).
 + */
 +
 +import * as fs from "node:fs";
@@ -676,14 +1265,10 @@ index 000000000..4f36d829b
 +  );
 +}
 +
-+describe.each([
-+  ["native", { forceWasm: false }],
-+  ["wasm", { forceWasm: true }],
-+])("openDatabase (%s backend)", (_name, extraOptions) => {
++describe("openDatabase (node-sqlite3-wasm)", () => {
 +  it("runs the full run / get / all / exec / prepare surface", async () => {
 +    const db = await openDatabase({
 +      filename: makeTempDbPath(),
-+      ...extraOptions,
 +    });
 +
 +    await db.exec("CREATE TABLE items (id INTEGER PRIMARY KEY, name TEXT)");
@@ -727,7 +1312,7 @@ index 000000000..4f36d829b
 +    expect(named).toHaveLength(1);
 +
 +    // lastID alias normalization on run results
-+    // NOTE: the native `sqlite` package may return the raw driver result
++    // NOTE: the raw driver result may expose lastID instead of lastInsertRowid
 +    // (lastID only) depending on the driver; both keys are normalized.
 +    const withId = await db.run("INSERT INTO items (name) VALUES (?)", "gamma");
 +    expect(withId.lastID).toBe(3);
@@ -739,7 +1324,6 @@ index 000000000..4f36d829b
 +  it("supports transactions and PRAGMAs", async () => {
 +    const db = await openDatabase({
 +      filename: makeTempDbPath(),
-+      ...extraOptions,
 +    });
 +
 +    await db.exec("PRAGMA busy_timeout = 3000;");
@@ -753,23 +1337,18 @@ index 000000000..4f36d829b
 +});
 diff --git a/core/util/sqliteBackend.ts b/core/util/sqliteBackend.ts
 new file mode 100644
-index 000000000..ef343a8ee
+index 000000000..6e225de9f
 --- /dev/null
 +++ b/core/util/sqliteBackend.ts
-@@ -0,0 +1,191 @@
+@@ -0,0 +1,108 @@
 +/**
-+ * Unified SQLite backend for core.
++ * SQLite backend for core, backed by `node-sqlite3-wasm` (pure WebAssembly,
++ * installed from the npm registry - no native binary, no GitHub download,
++ * no install scripts). Replaces the native `sqlite3` driver dependency.
 + *
-+ * Prefers the native `sqlite3` driver (faster) when its binding is available,
-+ * and transparently falls back to `node-sqlite3-wasm` (pure WebAssembly,
-+ * installed from the npm registry - no native binary, no GitHub download) when
-+ * it is not. On corporate machines behind authenticating proxies this removes
-+ * the last dependency on GitHub-hosted binaries.
-+ *
-+ * The returned object mirrors the promise-based API of the `sqlite` package
-+ * for the subset core uses: run / get / all / exec / prepare / close, plus the
-+ * raw-driver `lastID` property normalized onto run results (the WASM backend
-+ * only exposes lastInsertRowid).
++ * The exposed surface mirrors the promise-based API of the `sqlite` package
++ * for the subset core uses: run / get / all / exec / prepare / close, with
++ * the raw-driver `lastID` normalized onto run results.
 + */
 +
 +export interface SqliteRunResult {
@@ -800,18 +1379,6 @@ index 000000000..ef343a8ee
 +  filename: string;
 +  /** Fail instead of creating the file when it does not exist (default false). */
 +  fileMustExist?: boolean;
-+  /** Force the WASM backend even when the native binding is available. */
-+  forceWasm?: boolean;
-+}
-+
-+/** Resolve the native sqlite3 driver lazily; undefined when unavailable. */
-+async function tryLoadNativeDriver(): Promise<any | undefined> {
-+  try {
-+    const mod = await import("sqlite3");
-+    return (mod as any).default?.Database ?? (mod as any).Database;
-+  } catch {
-+    return undefined;
-+  }
 +}
 +
 +/**
@@ -821,78 +1388,12 @@ index 000000000..ef343a8ee
 +export async function openDatabase(
 +  options: SqliteOpenOptions,
 +): Promise<SqliteDatabaseLike> {
-+  if (!options.forceWasm) {
-+    try {
-+      const driver = await tryLoadNativeDriver();
-+      if (driver) {
-+        const { open } = await import("sqlite");
-+        const nativeDb = await (open as any)({
-+          filename: options.filename,
-+          driver,
-+          fileMustExist: options.fileMustExist,
-+        });
-+        return new NativeSqliteDatabase(nativeDb);
-+      }
-+    } catch (error) {
-+      // Fall through to the WASM backend - e.g. the native binding is missing
-+      // (install scripts skipped behind corporate proxies).
-+      const reason = error instanceof Error ? error.message : String(error);
-+      console.info(
-+        `[sqlite] Native binding unavailable (${reason.slice(0, 120)}) - using node-sqlite3-wasm fallback`,
-+      );
-+    }
-+  }
-+
 +  const mod: any = await import("node-sqlite3-wasm");
 +  const Database = mod.default?.Database ?? mod.Database;
 +  const wasmDb = new Database(options.filename, {
 +    fileMustExist: options.fileMustExist ?? false,
 +  });
 +  return new WasmSqliteDatabase(wasmDb);
-+}
-+
-+/**
-+ * Adapter over the native `sqlite` package database normalizing the run
-+ * results (lastID) and the prepare-with-parameters usage.
-+ */
-+class NativeSqliteDatabase implements SqliteDatabaseLike {
-+  constructor(private readonly nativeDb: any) {}
-+
-+  async run(sql: string, ...values: any[]): Promise<SqliteRunResult> {
-+    const result = await this.nativeDb.run(sql, ...values);
-+    return {
-+      changes: result?.changes ?? 0,
-+      lastInsertRowid: result?.lastInsertRowid ?? result?.lastID ?? 0,
-+      lastID: result?.lastID ?? result?.lastInsertRowid ?? 0,
-+    };
-+  }
-+
-+  async all<T = any[]>(sql: string, ...values: any[]): Promise<T> {
-+    return (await this.nativeDb.all(sql, ...values)) as T;
-+  }
-+
-+  async get<T = any>(sql: string, ...values: any[]): Promise<T | undefined> {
-+    return (await this.nativeDb.get(sql, ...values)) as T | undefined;
-+  }
-+
-+  async exec(sql: string): Promise<void> {
-+    return this.nativeDb.exec(sql);
-+  }
-+
-+  async prepare(sql: string, ...values: any[]): Promise<SqliteStatement> {
-+    return {
-+      all: async (...binds: any[]) =>
-+        this.all(sql, ...(binds.length ? binds : values)),
-+      get: async (...binds: any[]) =>
-+        this.get(sql, ...(binds.length ? binds : values)),
-+      run: async (...binds: any[]) =>
-+        this.run(sql, ...(binds.length ? binds : values)),
-+    };
-+  }
-+
-+  async close(): Promise<void> {
-+    return this.nativeDb.close();
-+  }
 +}
 +
 +/**
