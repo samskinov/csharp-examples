@@ -11,7 +11,7 @@ pour les postes derrière un proxy d'entreprise.
 |---|---|---|
 | 1 | `continue-improvements.patch` | 14 commits : résilience stream/thinking/429, freezes (tokenisation workers, sessions async), tools, watchdog |
 | 2 | `continue-cli-modes.patch` | 4 commits : CLI chat/plan/agent + tools text, streaming live, perf GUI |
-| 3 | `continue-fallbacks.patch` | 1 commit : SQLite WASM (plus de binding natif), recherche intégrée (plus de ripgrep), prepackage adapté |
+| 3 | `continue-fallbacks.patch` | 1 commit : SQLite WASM (plus de binding natif), `dbinfoz`/`@database` retiré, recherche intégrée (plus de ripgrep), prepackage adapté |
 
 ⚠️ Vérification faite : empilement `git am` 14+4+1 = **19 commits** sur `main`
 propre. Version de référence : `v2.1.0-vscode` (tag) ou `main` (état final).
@@ -83,7 +83,8 @@ Chaque ligne ci-dessus est une étape : si elle renvoie un code ≠ 0
 
 Aucun module natif à compiler pour le build : sqlite3 est remplacé par
 `node-sqlite3-wasm` (WASM depuis le registry), la recherche par une
-implémentation intégrée.
+implémentation intégrée. Le provider `@database` (déprécié) est désactivé : il
+tirait `dbinfoz`, donc `sqlite3` et son binding natif.
 
 ### Réinstallation propre (node_modules incomplet)
 
@@ -155,6 +156,23 @@ npm link                           :: (optionnel) commande `cn` globale
 ```
 
 ## 5. Notes
+
+- **« Could not locate the bindings file » / `node_sqlite3.node` à l'ouverture
+  de VS Code** : l'ancien patch #3 laissait `dbinfoz` (donc `sqlite3`) dans les
+  dépendances de l'extension ; esbuild l'embarquait et l'activation échouait.
+  Le patch #3 corrigé le retire. Si l'ancien patch est déjà appliqué (c'est le
+  dernier commit) :
+  ```cmd
+  git reset --hard HEAD^
+  git am continue-fallbacks.patch
+
+  cd core && npm ci --include=dev --ignore-scripts --no-audit --no-fund && npm run build && cd ..
+  cd extensions\vscode && npm ci --no-audit --no-fund
+  npm run prepackage -- --target win32-x64 && npm run package -- --target win32-x64
+  ```
+  Vérifier avant de rebuilder : `git log --oneline -3` doit montrer le patch
+  SQLite en dernier, et `findstr /i dbinfoz extensions\vscode\package.json` ne
+  doit rien renvoyer.
 
 - **Node 24** validé de bout en bout (v24.22.3) : `engines` >= 20.20.1 ✓.
 - Le **tag nommé `main`** du repo rend `main..branche` ambigu : utiliser
