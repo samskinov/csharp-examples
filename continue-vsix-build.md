@@ -224,6 +224,17 @@ $env:SHARP_DIST_BASE_URL = "http://127.0.0.1:8080/"   # slash final OBLIGATOIRE
 - **simple-get n'utilise pas le proxy npm** → seul le miroir/local fonctionne pour
   ce download (c'est pourquoi le 407 persistait malgré npm config proxy).
 
+**d) `comment-json` introuvable au build du CLI**
+- `npm ls comment-json` doit être lancé **dans `core/`** (dep de core, pas du
+  CLI ni de la racine — « not found » ailleurs est normal)
+- introuvable même dans `core/` → arbre incomplet (install avortée par un 407) :
+```powershell
+cd core
+If (Test-Path node_modules) { Remove-Item -Recurse -Force node_modules }
+npm ci ; npm run build
+cd ..\extensions\cli ; npm run build ; node dist\cn.js --help
+```
+
 **e) `prebuild-install warn install status code 407` (sharp 0.32 / sqlite3)**
 
 `prebuild-install` est le downloader partagé de `sharp@0.32.6` et `sqlite3@5.1.7`
@@ -255,17 +266,6 @@ Cache global aussi consulté : `%LOCALAPPDATA%\npm-cache\_prebuilds\`.
 | `prebuild-install` | sharp 0.32, sqlite3 | ✅ (`npm_config_https_proxy`) | `prebuilds\` du package |
 | `libvips.js` (sharp) | libvips de sharp 0.32 | ❌ (simple-get) | `sharp_libvips_local_prebuilds` |
 | `node-pre-gyp` | fallback sqlite3 | partiel | `sqlite3_binary_host_mirror` |
-
-**d) `comment-json` introuvable au build du CLI**
-- `npm ls comment-json` doit être lancé **dans `core/`** (dep de core, pas du
-  CLI ni de la racine — « not found » ailleurs est normal)
-- introuvable même dans `core/` → arbre incomplet (install avortée par un 407) :
-```powershell
-cd core
-If (Test-Path node_modules) { Remove-Item -Recurse -Force node_modules }
-npm ci ; npm run build
-cd ..\extensions\cli ; npm run build ; node dist\cn.js --help
-```
 
 ### 6.3 npm ≥ 9/11 rejette `npm config set` pour ces clés (« not a valid option »)
 
