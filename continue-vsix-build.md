@@ -195,12 +195,37 @@ set NODEJS_ORG_MIRROR=http://127.0.0.1:8080
 npm rebuild sqlite3 --verbose
 ```
 
-Variante - source Node complete comme nodedir (contient common.gypi) :
+Methode 2 - headers EXTRAITS comme nodedir (sans serveur HTTP) :
+```cmd
+:: 1) navigateur : https://nodejs.org/dist/v24.15.0/node-v24.15.0-headers.tar.gz
+:: 2) extraire (tar.exe integre a Windows 10+) :
+mkdir C:\node-headers
+tar -xzf node-v24.15.0-headers.tar.gz -C C:\node-headers
+::    -> C:\node-headers\include\node\*.h
+:: 3) pointer nodedir dessus :
+npm config set nodedir "C:\node-headers"
+:: 4) rebuild :
+cd core
+npm rebuild sqlite3 --verbose
+```
+(avec cette methode, si "common.gypi not found" reaparait, node-gyp exige plus
+que les headers -> utiliser la Methode 1 ou la Methode 3 ci-dessous)
+
+Methode 3 - source Node COMPLETE comme nodedir (contient common.gypi garanti) :
 ```cmd
 :: navigateur : https://nodejs.org/dist/v24.15.0/node-v24.15.0.tar.gz
 tar -xzf node-v24.15.0.tar.gz -C C:\node-src
 npm config set nodedir "C:\node-src\node-v24.15.0"
 ```
+
+CHANGER / VERIFIER le nodedir (les 3 commandes) :
+```cmd
+npm config set nodedir "C:\node-headers"   :: definir
+npm config get nodedir                     :: voir la valeur active
+npm config delete nodedir                  :: supprimer (retour au download via NODEJS_ORG_MIRROR)
+```
+NB : la variable d'environnement session `$env:npm_config_nodedir` a la
+priorite sur .npmrc - verifier les deux si le comportement semble incoherent.
 
 **b) sharp 0.33 : « Could not load sharp » + 407 sur fallback libvips**
 ```powershell
