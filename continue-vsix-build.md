@@ -322,7 +322,49 @@ npm rebuild sqlite3
 - Règle pratique : `npm ci` une fois quand tout passe ; ensuite `npm install`
   + `npm rebuild` ciblés.
 
-### 6.4 Proxy NTLM / Kerberos / **Negotiate** (le 407 persiste avec identifiants)
+### 6.5bis **Px impossible à installer ?** Deux sorties
+
+**A) Proxy NTLM en pur Node** (le registry npm fonctionne chez vous) :
+```cmd
+npm i -g proxy-login-automator
+:: proxy local qui fait le NTLM vers le proxy corporate :
+proxy-login-automator --local_port 3128 --remote_host proxy.corp --remote_port 8080 --usr "DOMAINE\user" --pwd "motdepasse"
+:: puis pointer npm + HTTPS_PROXY sur http://127.0.0.1:3128 (comme Px)
+```
+
+**B) Build VSIX 100 % hors-ligne (aucun download de script)** — `SKIP_INSTALLS=true`
+skippe les téléchargements du prepackage (sqlite + esbuild S3 + npm installs),
+à condition de placer les binaires à la main (téléchargés au navigateur, qui
+passe le Negotiate) :
+
+```powershell
+# 0) packages + core construits une fois (build-packages.js, avec prebuilds/ mirror)
+node .\scripts\build-packages.js
+
+# 1) sqlite binding pour core (si l'install script de sqlite3 a échoué) :
+#    browser: https://github.com/TryGhost/node-sqlite3/releases/download/v5.1.7/sqlite3-v5.1.7-napi-v6-win32-x64.tar.gz
+cd core\node_modules\sqlite3
+tar -xzf ..\..\..\Downloads\sqlite3-v5.1.7-napi-v6-win32-x64.tar.gz
+#    → core\node_modules\sqlite3\build\Release\node_sqlite3.node
+
+# 2) esbuild embarqué dans le VSIX (bucket S3 — souvent autorisé par le proxy) :
+#    browser: https://continue-server-binaries.s3.us-west-1.amazonaws.com/win32-x64/esbuild.zip
+cd extensions\vscode
+mkdir node_modules\@esbuild 2>$null
+Copy-Item ..\..\..\Downloads\esbuild.zip node_modules\@esbuild\
+cd node_modules\@esbuild ; Expand-Archive esbuild.zip . ; cd ..\..
+
+# 3) prepackage + package SANS aucun download :
+$env:SKIP_INSTALLS = "true"
+npm run prepackage -- --target win32-x64
+npm run package -- --target win32-x64
+#   (le prepackage copie alors le binding sqlite depuis core/node_modules)
+```
+
+Note : le tarball sqlite extrait à l'étape 1 donne `build\Release\node_sqlite3.node`
+— c'est exactement ce que le prepackage attend (il copie depuis core).
+
+### 6.6 Proxy NTLM / Kerberos / **Negotiate** (le 407 persiste avec identifiants)
 
 npm et node-gyp ne parlent pas Negotiate (handshake NTLM/Kerberos multi-étapes) :
 les identifiants en clair dans l'URL ne servent à rien — 407 systématique, même si
