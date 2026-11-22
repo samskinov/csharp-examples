@@ -53,3 +53,6 @@ appsettings.Local.json
 
 # Local source checkout used for building Continue
 continue/
+
+# Generated VSIX artifacts
+*.vsix
