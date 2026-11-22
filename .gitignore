@@ -19,6 +19,8 @@ coverage*/
 *.coverage
 *.coveragexml
 
+continue/*
+
 # NuGet
 *.nupkg
 *.snupkg
@@ -48,3 +50,6 @@ Thumbs.db
 appsettings.Local.json
 *.env
 .env
+
+# Local source checkout used for building Continue
+continue/

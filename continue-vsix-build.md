@@ -10,16 +10,13 @@ d'entreprise.
 
 | Ordre | Fichier | Contenu |
 |---|---|---|
-| 1 | `01-continue-improvements.patch` | 14 commits : résilience stream/thinking/429, freezes (tokenisation workers, sessions async), tools, watchdog |
-| 2 | `02-continue-cli-modes.patch` | 4 commits : CLI chat/plan/agent + tools text, streaming live, perf GUI |
-| 3 | `03-continue-fallbacks.patch` | 1 commit : SQLite WASM (plus de binding natif), `dbinfoz`/`@database` retiré, recherche intégrée (plus de ripgrep), prepackage adapté |
-| 4 | `04-continue-cli-tools.patch` | 6 commits : chat sans tools natifs, un seul system message en tête, `/tool-mode` visible, réparation des tool calls XML (`</arg_value>`, `file_path`) côté CLI et VS Code, fallback XML en mode texte, VSIX limité au binaire LanceDB de la cible |
-| 5 | `05-continue-vscode-activation.patch` | 1 commit : logs d'activation visibles, `system-ca` chargé dynamiquement, binding `win-ca` correctement embarqué/copié |
-| 6 | `06-continue-agent-performance.patch` | boucle bornée, lecture par plage, outils top, MCP préfixé, rendu TUI stable, AskQuestion VS Code |
+| 1 | `01-continue-improvements.patch` | 14 commits
+| 2 | `02-continue-cli-modes.patch` | 4 commits
+| 3 | `03-continue-fallbacks.patch` | 1 commit
+| 4 | `04-continue-cli-tools.patch` | 6 commits
+| 5 | `05-continue-vscode-activation.patch` | 1 commit
+| 6 | `06-continue-agent-performance.patch`
 
-⚠️ Vérification faite : empilement `git am` 14+4+1+6+1 = **26 commits** sur
-`main` propre. Version de référence : `v2.1.0-vscode` (tag) ou `main` (état
-final).
 
 ## 1. Clone + patchs
 
@@ -93,6 +90,47 @@ Aucun module natif à compiler pour le build : sqlite3 est remplacé par
 `node-sqlite3-wasm` (WASM depuis le registry), la recherche par une
 implémentation intégrée. Le provider `@database` (déprécié) est désactivé : il
 tirait `dbinfoz`, donc `sqlite3` et son binding natif.
+
+### Si `npm ci` a déjà été exécuté correctement
+
+Après l'application du patch 06 ou de toute autre modification source, il n'est
+pas nécessaire de refaire `npm ci` si les fichiers `package.json`,
+`package-lock.json` et l'arbre `node_modules` n'ont pas changé.
+
+Les dépendances déjà installées restent utilisables. Reconstruire seulement les
+couches dont le code source a été modifié:
+
+```cmd
+:: Depuis la racine continue\
+cd core
+npm run build
+cd ..
+
+cd gui
+npm run build
+cd ..
+
+cd extensions\cli
+npm run build
+cd ..\..
+
+cd extensions\vscode
+set SKIP_INSTALLS=true
+npm run prepackage -- --target win32-x64
+npm run package -- --target win32-x64
+```
+
+Avec le VS Code GUI patché, `gui` doit être construit avant
+`extensions\vscode`, sinon le VSIX peut embarquer une ancienne version du GUI.
+
+Relancer `npm ci` uniquement dans ces cas:
+
+```text
+- package.json ou package-lock.json ont été modifiés;
+- node_modules est incomplet ou une erreur Cannot find module apparaît;
+- l'installation précédente a été interrompue;
+- core/gui/cli/vscode doivent repartir d'une arborescence propre.
+```
 
 ### Réinstallation propre (node_modules incomplet)
 
