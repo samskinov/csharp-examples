@@ -304,6 +304,22 @@ CLI et VSIX. Aucun binding natif SQLite/ripgrep n'est requis:
 - les scripts `--ignore-scripts` évitent les téléchargements Sharp/Puppeteer
   sans bloquer le build.
 
+### Mode tool text et reprise
+
+- CN utilise `text` par défaut: aucun paramètre `tools` natif n'est envoyé;
+- `/tool-mode native` reste disponible si le serveur OpenAI-compatible le supporte;
+- les tags textuels sont limités à des blocs JSON/XML explicitement documentés;
+- les modes `chat` n'envoient aucun outil;
+- les streams idle, 429/529, 500/502/503/504/524, premature close,
+  connection aborted, broken pipe et timeout sont repris automatiquement;
+- `finish_reason=length` reprend l'explication incomplète/partielle;
+- les tool calls incomplets sont nettoyés et relancés avec un nudge;
+- les sorties terminales sont rafraîchies au maximum toutes les 100 ms;
+- les streams du GUI sont batchés toutes les 100 ms;
+- les recherches natives donnent le thread à Node toutes les 25 fichiers;
+- les commandes background conservent leur sortie et peuvent être relues
+  avec `CheckBackgroundJob`.
+
 ## 7. Paramètres des nouveaux outils
 
 ### Lecture
@@ -371,6 +387,56 @@ CLI et VSIX. Aucun binding natif SQLite/ripgrep n'est requis:
   - `filepath`;
   - `kind`: filtre optionnel;
   - `limit`.
+- `GetReferences`
+  - `filepath`, `line`, `character`: position 1-based;
+  - `limit`.
+- `GetDefinition`
+  - `filepath`, `line`, `character`: position 1-based;
+  - `includeTypeDefinition`;
+- `SearchWorkspaceSymbols`
+  - `query`, `kind`, `limit`.
+- `ApplyPatch`
+  - `patch`: diff unifié ou format `*** Begin Patch`;
+  - `dryRun`;
+- `GrepSearch`
+  - `query`, `path`, `glob`, `exclude`;
+  - `caseSensitive`, `fixedStrings`;
+  - `contextBefore`, `contextAfter`;
+  - `totalMaxMatches`, `maxMatchesPerFile`;
+  - `outputMode`, `multiline`.
+- `Checklist`
+  - `checklist`: tâches Markdown vérifiables;
+- `CheckBackgroundJob`
+  - `job_id`: statut, sortie partielle/finale, exit code.
+- `GetReferences`
+  - `filepath`, `line`, `character`: position 1-based du symbole;
+  - `limit`: nombre maximum de références.
+- `GetDefinition`
+  - `filepath`, `line`, `character`: position 1-based du symbole;
+  - `includeTypeDefinition`: inclure aussi la définition de type;
+  - `limit`.
+- `SearchWorkspaceSymbols`
+  - `query`: nom ou fragment du symbole;
+  - `kind`: filtre optionnel;
+  - `limit`.
+- `ApplyPatch`
+  - `patch`: diff unifié ou format `*** Begin Patch`;
+  - `dryRun`: validation/prévisualisation sans écriture;
+  - applique les fichiers atomiquement après validation.
+- `GrepSearch`
+  - `query`;
+  - `path`, `glob`, `exclude`;
+  - `caseSensitive`;
+  - `fixedStrings`;
+  - `contextBefore`, `contextAfter`;
+  - `totalMaxMatches`, `maxMatchesPerFile`;
+  - `outputMode`: `content`, `files` ou `count`;
+  - `multiline`.
+- `Checklist`
+  - `checklist`: liste Markdown courte avec `- [ ]` et `- [x]`.
+- `CheckBackgroundJob`
+  - `job_id`: identifiant du tool call ou du job;
+  - retourne statut, sortie partielle/finale et exit code.
 
 ## 8. Changement de dossier CN
 

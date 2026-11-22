@@ -1,0 +1,130 @@
+name: Build and smoke test Windows VSIX
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - "0*-continue-*.patch"
+      - "06-continue-agent-performance.patch"
+      - "continue-vsix-build.md"
+
+jobs:
+  windows-vsix:
+    runs-on: windows-latest
+    timeout-minutes: 45
+    steps:
+      - name: Checkout patch repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node 24
+        uses: actions/setup-node@v4
+        with:
+          node-version: "24.22.3"
+
+      - name: Clone Continue and apply patches
+        shell: pwsh
+        run: |
+          git clone --filter=blob:none https://github.com/continuedev/continue.git continue
+          cd continue
+          git checkout 5522c6f44
+          git am ../01-continue-improvements.patch
+          git am ../02-continue-cli-modes.patch
+          git am ../03-continue-fallbacks.patch
+          git am ../04-continue-cli-tools.patch
+          git am ../05-continue-vscode-activation.patch
+          git am ../06-continue-agent-performance.patch
+
+      - name: Build internal packages
+        shell: cmd
+        run: |
+          cd continue
+          node scripts\build-packages.js
+          cd core
+          npm ci --include=dev --ignore-scripts --no-audit --no-fund
+          npm run build
+          cd ..\gui
+          npm ci --no-audit --no-fund --ignore-scripts
+          npm run build
+          cd ..\extensions\cli
+          npm ci --no-audit --no-fund --ignore-scripts
+          npm run build
+          cd ..\vscode
+          npm ci --no-audit --no-fund --ignore-scripts
+          set SKIP_INSTALLS=true
+          npm run package -- --target win32-x64
+
+      - name: Locate VSIX
+        shell: pwsh
+        run: |
+          $vsix = Get-ChildItem continue\extensions\vscode\build\*.vsix |
+            Where-Object Name -Match "win32-x64" |
+            Select-Object -First 1
+          if (-not $vsix) { throw "Windows VSIX not found" }
+          "VSIX_PATH=$($vsix.FullName)" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+
+      - name: Verify VSIX contents
+        shell: pwsh
+        run: |
+          Add-Type -AssemblyName System.IO.Compression.FileSystem
+          $zip = [System.IO.Compression.ZipFile]::OpenRead($env:VSIX_PATH)
+          $entries = $zip.Entries.FullName
+          $zip.Dispose()
+          if (-not ($entries -contains "extension/out/extension.js")) {
+            throw "VSIX entry point missing"
+          }
+          if (-not ($entries -match "vectordb-win32-x64-msvc/index\.node")) {
+            throw "Windows LanceDB binary missing"
+          }
+          if ($entries -match "vectordb-linux-x64-gnu") {
+            throw "Linux LanceDB binary leaked into Windows VSIX"
+          }
+          if ($entries -match "node_sqlite3\.node|sqlite3-binding") {
+            throw "Native sqlite3 binding found"
+          }
+
+      - name: Install and launch VSIX in VS Code
+        shell: pwsh
+        run: |
+          code --install-extension "$env:VSIX_PATH" --force
+          code --list-extensions --show-versions
+          $userData = Join-Path $env:RUNNER_TEMP "continue-vscode-user"
+          $extensions = Join-Path $env:RUNNER_TEMP "continue-vscode-ext"
+          New-Item -ItemType Directory -Force $userData | Out-Null
+          New-Item -ItemType Directory -Force $extensions | Out-Null
+          $process = Start-Process code -ArgumentList @(
+            "--disable-workspace-trust",
+            "--disable-gpu",
+            "--user-data-dir", "`"$userData`"",
+            "--extensions-dir", "`"$extensions`"",
+            "$env:GITHUB_WORKSPACE"
+          ) -PassThru
+          Start-Sleep -Seconds 25
+          if (-not $process.HasExited) {
+            Stop-Process -Id $process.Id -Force
+          }
+          code --list-extensions --show-versions
+
+      - name: Collect VS Code logs
+        if: always()
+        shell: pwsh
+        run: |
+          $dest = Join-Path $env:GITHUB_WORKSPACE "vscode-smoke-logs"
+          New-Item -ItemType Directory -Force $dest | Out-Null
+          $logRoot = Join-Path $env:APPDATA "Code\logs"
+          if (Test-Path $logRoot) {
+            Copy-Item -Recurse -Force $logRoot $dest
+          }
+          $activationLog = Join-Path $env:USERPROFILE ".continue\logs\activation-error.log"
+          if (Test-Path $activationLog) {
+            Copy-Item -Force $activationLog $dest
+          }
+
+      - name: Upload VSIX and smoke logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: continue-windows-vsix
+          path: |
+            continue/extensions/vscode/build/*.vsix
+            vscode-smoke-logs
