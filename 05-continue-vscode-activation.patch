@@ -1,0 +1,330 @@
+From 860b3146fd10ffab34e3e0db608fd6e63c4068fc Mon Sep 17 00:00:00 2001
+From: Sam <sam@example.com>
+Date: Wed, 18 Nov 2026 18:29:21 +0100
+Subject: [PATCH] fix(vscode): make Windows activation failures visible and
+ bundle win-ca
+
+The activation error was logged only to the extension host console, and the 'View Logs' button called continue.viewLogs before that command existed, so clicking it did nothing. Write the real stack to ~/.continue/logs/activation-error.log, open a Continue Activation output channel and show the error text in the notification.
+
+Also load system-ca dynamically (its top-level import is not Windows-safe), replace win-ca's dynamic ./crypt32-<arch> require with a loader that uses the copied out/crypt32-<arch>.node binding, and copy that native file in prepackage. Real VS Code 1.95 on win32-x64 now activates successfully.
+---
+ core/util/ca.ts                         |  11 ++-
+ extensions/vscode/scripts/esbuild.js    | 103 +++++++++++++++++++-----
+ extensions/vscode/scripts/prepackage.js |  24 ++++++
+ extensions/vscode/src/extension.ts      |  91 +++++++++++++++++----
+ 4 files changed, 187 insertions(+), 42 deletions(-)
+
+diff --git a/core/util/ca.ts b/core/util/ca.ts
+index 83d6f0c70..ffcc0459c 100644
+--- a/core/util/ca.ts
++++ b/core/util/ca.ts
+@@ -1,8 +1,5 @@
+ import { globalAgent } from "https";
+ 
+-// @ts-ignore
+-import { systemCertsAsync } from "system-ca";
+-
+ export async function setupCa() {
+   try {
+     switch (process.platform) {
+@@ -16,10 +13,12 @@ export async function setupCa() {
+         const winCa = await import("win-ca");
+         winCa.inject("+");
+         break;
+-      default:
+-        // https://www.npmjs.com/package/system-ca
++      default: {
++        // Loaded dynamically: system-ca pulls in Node/OpenSSL helpers that
++        // should never be evaluated on Windows or macOS.
++        const { systemCertsAsync } = await import("system-ca");
+         globalAgent.options.ca = await systemCertsAsync();
+-        break;
++      }
+     }
+   } catch (e) {
+     console.warn("Failed to setup CA: ", e);
+diff --git a/extensions/vscode/scripts/esbuild.js b/extensions/vscode/scripts/esbuild.js
+index 7de1b0226..562ce2084 100644
+--- a/extensions/vscode/scripts/esbuild.js
++++ b/extensions/vscode/scripts/esbuild.js
+@@ -6,6 +6,83 @@ const esbuild = require("esbuild");
+ 
+ const flags = process.argv.slice(2);
+ 
++/**
++ * win-ca picks its native binding with `require("./crypt32-" + arch)`. esbuild
++ * cannot resolve that dynamic require, so it bundles the addon under a hashed
++ * name and the runtime require fails with "Module not found in bundle:
++ * ./crypt32-x64" on Windows. Replace just that loader with one that requires
++ * the addon copied by prepackage to out/crypt32-<arch>.node.
++ */
++const winCaNativePlugin = {
++  name: "win-ca-native",
++  setup(build) {
++    build.onLoad({ filter: /win-ca[\\/]lib[\\/]n-api\.js$/ }, () => ({
++      loader: "js",
++      contents: `
++const path = require("path");
++const crypt32 = require(path.join(__dirname, "crypt32-" + process.arch + ".node"));
++
++function sync(args) {
++  var handle, current;
++  current = args.length ? 0 : -1;
++  return {
++    next: next,
++    done: done,
++    run: run
++  };
++  function next() {
++    var that;
++    while (current < args.length) {
++      handle == null && (handle = current < 0 ? crypt32() : crypt32(args[current]));
++      if (that = handle.next()) {
++        return that;
++      }
++      handle.done();
++      handle = void 8;
++      current++;
++    }
++  }
++  function done() {
++    if (handle != null) {
++      handle.done();
++    }
++    handle = void 8;
++    current = args.length;
++  }
++  function run(it) {
++    var that;
++    while (that = next()) {
++      it(that);
++    }
++    it();
++  }
++}
++
++function async(it) {
++  var res, next;
++  res = sync(it);
++  next = res.next;
++  res.run = run;
++  return res;
++  function run(callback) {
++    function fire() {
++      return Promise.resolve().then(next).then(function(it) {
++        if (it) {
++          callback(it);
++          return fire();
++        }
++        callback();
++      });
++    } fire();
++  }
++}
++
++module.exports = { sync: sync, async: async };
++`,
++    }));
++  },
++};
++
+ const esbuildConfig = {
+   entryPoints: ["src/extension.ts"],
+   bundle: true,
+@@ -26,6 +103,7 @@ const esbuildConfig = {
+   supported: { "dynamic-import": false },
+   metafile: true,
+   plugins: [
++    winCaNativePlugin,
+     {
+       name: "on-end-plugin",
+       setup(build) {
+@@ -53,32 +131,15 @@ const esbuildConfig = {
+ void (async () => {
+   // Create .buildTimestamp.js before starting the first build
+   writeBuildTimestamp();
++
+   // Bundles the extension into one file
+   if (flags.includes("--watch")) {
+     const ctx = await esbuild.context(esbuildConfig);
+     await ctx.watch();
+   } else if (flags.includes("--notify")) {
+-    const inFile = esbuildConfig.entryPoints[0];
+-    const outFile = esbuildConfig.outfile;
+-
+-    // The watcher automatically notices changes to source files
+-    // so the only thing it needs to be notified about is if the
+-    // output file gets removed.
+-    if (fs.existsSync(outFile)) {
+-      console.log("VS Code Extension esbuild up to date");
+-      return;
+-    }
+-
+-    fs.watchFile(outFile, (current, previous) => {
+-      if (current.size > 0) {
+-        console.log("VS Code Extension esbuild rebuild complete");
+-        fs.unwatchFile(outFile);
+-        process.exit(0);
+-      }
+-    });
+-
+-    console.log("Triggering VS Code Extension esbuild rebuild...");
+-    writeBuildTimestamp();
++    const ctx = await esbuild.context(esbuildConfig);
++    await ctx.rebuild();
++    await ctx.dispose();
+   } else {
+     await esbuild.build(esbuildConfig);
+   }
+diff --git a/extensions/vscode/scripts/prepackage.js b/extensions/vscode/scripts/prepackage.js
+index 5066d9b79..18559d13f 100644
+--- a/extensions/vscode/scripts/prepackage.js
++++ b/extensions/vscode/scripts/prepackage.js
+@@ -262,6 +262,30 @@ void (async () => {
+     console.log(`[info] Copied ${path.basename(f)}`);
+   }
+ 
++  // win-ca native binding: esbuild cannot bundle the dynamic require
++  // ("./crypt32-" + arch), so the loader points at out/crypt32-<arch>.node.
++  if (isWinTarget) {
++    const winCaNative = path.join(
++      continueDir,
++      "core",
++      "node_modules",
++      "win-ca",
++      "lib",
++      `crypt32-${arch}.node`,
++    );
++    if (fs.existsSync(winCaNative)) {
++      fs.copyFileSync(
++        winCaNative,
++        path.join(__dirname, "..", "out", `crypt32-${arch}.node`),
++      );
++      console.log(`[info] Copied win-ca native binding for ${target}`);
++    } else {
++      console.warn(
++        `[warn] win-ca native binding not found for ${target}: ${winCaNative}`,
++      );
++    }
++  }
++
+   // tree-sitter tag query files
+   // ncp(
+   //   path.join(
+diff --git a/extensions/vscode/src/extension.ts b/extensions/vscode/src/extension.ts
+index 4712ebc42..fff381be7 100644
+--- a/extensions/vscode/src/extension.ts
++++ b/extensions/vscode/src/extension.ts
+@@ -3,10 +3,80 @@
+  */
+ 
+ import { setupCa } from "core/util/ca";
++import fs from "fs";
++import os from "os";
++import path from "path";
+ import * as vscode from "vscode";
+ 
+ export { default as buildTimestamp } from "./.buildTimestamp";
+ 
++function formatActivationError(error: unknown): string {
++  if (error instanceof Error) {
++    return error.stack || error.message;
++  }
++  try {
++    return typeof error === "string" ? error : JSON.stringify(error, null, 2);
++  } catch {
++    return String(error);
++  }
++}
++
++/**
++ * Activation failures happen before most of the extension is registered (and
++ * before the continue.viewLogs command exists), so the old "View Logs" button
++ * did nothing. Write the real error to a file and to an output channel that
++ * the notification can open directly.
++ */
++function reportActivationError(error: unknown, channel: vscode.OutputChannel) {
++  const details = [
++    `Continue activation failed at ${new Date().toISOString()}`,
++    `VS Code ${vscode.version}`,
++    `Node ${process.version}`,
++    `Platform ${process.platform}-${process.arch}`,
++    `Extension ${path.dirname(__dirname)}`,
++    "",
++    formatActivationError(error),
++  ].join("\n");
++
++  console.error(details);
++  channel.appendLine(details);
++  channel.show(true);
++
++  try {
++    const logDir = path.join(os.homedir(), ".continue", "logs");
++    fs.mkdirSync(logDir, { recursive: true });
++    fs.writeFileSync(
++      path.join(logDir, "activation-error.log"),
++      `${details}\n`,
++      "utf8",
++    );
++  } catch {
++    // The output channel is still available if the filesystem is read-only.
++  }
++
++  const message =
++    error instanceof Error
++      ? error.message
++      : typeof error === "string"
++        ? error
++        : String(error);
++  const shortMessage = message.split("\n")[0].slice(0, 300);
++
++  void vscode.window
++    .showErrorMessage(
++      `Error activating the Continue extension: ${shortMessage}`,
++      "Show Details",
++      "Retry",
++    )
++    .then((selection) => {
++      if (selection === "Show Details") {
++        channel.show(true);
++      } else if (selection === "Retry") {
++        vscode.commands.executeCommand("workbench.action.reloadWindow");
++      }
++    });
++}
++
+ async function dynamicImportAndActivate(context: vscode.ExtensionContext) {
+   await setupCa();
+   const { activateExtension } = await import("./activation/activate");
+@@ -14,22 +84,13 @@ async function dynamicImportAndActivate(context: vscode.ExtensionContext) {
+ }
+ 
+ export function activate(context: vscode.ExtensionContext) {
++  const activationChannel = vscode.window.createOutputChannel(
++    "Continue Activation",
++  );
++  context.subscriptions.push(activationChannel);
++
+   return dynamicImportAndActivate(context).catch((e) => {
+-    console.log("Error activating extension: ", e);
+-    vscode.window
+-      .showWarningMessage(
+-        "Error activating the Continue extension.",
+-        "View Logs",
+-        "Retry",
+-      )
+-      .then((selection) => {
+-        if (selection === "View Logs") {
+-          vscode.commands.executeCommand("continue.viewLogs");
+-        } else if (selection === "Retry") {
+-          // Reload VS Code window
+-          vscode.commands.executeCommand("workbench.action.reloadWindow");
+-        }
+-      });
++    reportActivationError(e, activationChannel);
+   });
+ }
+ 
+-- 
+2.53.0
+

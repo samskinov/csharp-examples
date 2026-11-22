@@ -1,0 +1,2345 @@
+From 75370956265bf8de75af60fa79436171c5f4b0e1 Mon Sep 17 00:00:00 2001
+From: sam <sam@local>
+Date: Tue, 17 Nov 2026 22:02:32 +0100
+Subject: [PATCH 1/4] feat(cli): chat mode + agent/plan with selectable text
+ tool mode
+
+- new "chat" permission mode (Shift+Tab cycle, --mode chat): plain
+  conversation, no tools offered (getRequestTools returns []), dedicated
+  conversational system message without tool/commit contexts
+- new tool mode "text": tools are described in the system message and
+  tool calls are parsed from fenced ```tool code blocks in the reply -
+  the native tools parameter is never sent, for OpenAI-compatible servers
+  with unreliable function calling. Independent of the permission mode,
+  works in agent (normal) and plan
+- runtime selection in the interface: /tool-mode [native|text] slash
+  command (toggles when no argument), mode indicator shows "tools:text"
+- startup flags: --tool-mode native|text and --mode chat|normal|plan|auto
+  (threaded through processCommandFlags -> initializeServices ->
+  ToolPermissionService)
+- switchToolMode on ToolPermissionService; text protocol implemented in
+  tools/textToolMode.ts with unit tests (single/multiple fences, json
+  fences tolerated, unknown tools and non-JSON blocks ignored, string
+  arguments normalized)
+---
+ extensions/cli/src/flags/flagProcessor.ts     |  38 +++-
+ extensions/cli/src/permissions/types.ts       |  11 +-
+ .../cli/src/services/SystemMessageService.ts  |  14 +-
+ .../cli/src/services/ToolPermissionService.ts |  26 ++-
+ extensions/cli/src/services/index.ts          |   3 +
+ extensions/cli/src/services/types.ts          |   3 +-
+ extensions/cli/src/shared-options.ts          |  10 ++
+ extensions/cli/src/slashCommands.ts           |  19 +-
+ extensions/cli/src/stream/handleToolCalls.ts  |   9 +-
+ .../cli/src/stream/streamChatResponse.ts      |  52 +++++-
+ extensions/cli/src/systemMessage.ts           |  29 +++-
+ extensions/cli/src/tools/textToolMode.test.ts | 137 +++++++++++++++
+ extensions/cli/src/tools/textToolMode.ts      | 162 ++++++++++++++++++
+ extensions/cli/src/ui/UserInput.tsx           |   2 +-
+ .../cli/src/ui/components/ModeIndicator.tsx   |   8 +-
+ 15 files changed, 501 insertions(+), 22 deletions(-)
+ create mode 100644 extensions/cli/src/tools/textToolMode.test.ts
+ create mode 100644 extensions/cli/src/tools/textToolMode.ts
+
+diff --git a/extensions/cli/src/flags/flagProcessor.ts b/extensions/cli/src/flags/flagProcessor.ts
+index 5a0236934..c0dbd19e5 100644
+--- a/extensions/cli/src/flags/flagProcessor.ts
++++ b/extensions/cli/src/flags/flagProcessor.ts
+@@ -2,20 +2,24 @@
+  * Shared flag processing utilities to eliminate duplication between TUI and headless modes
+  */
+ 
+-import { PermissionMode } from "../permissions/types.js";
++import { PermissionMode, ToolMode } from "../permissions/types.js";
+ 
+ export interface PermissionOverrides {
+   allow?: string[];
+   ask?: string[];
+   exclude?: string[];
+   mode?: PermissionMode;
++  toolMode?: ToolMode;
+ }
+ 
+ export interface ProcessedFlags {
+   mode?: PermissionMode;
++  toolMode?: ToolMode;
+   permissionOverrides: PermissionOverrides;
+ }
+ 
++const PERMISSION_MODES: PermissionMode[] = ["normal", "plan", "auto", "chat"];
++
+ /**
+  * Converts legacy readonly/auto flags to the new mode system
+  * This logic was previously duplicated in chat.ts lines 168-173 and 259-264
+@@ -48,12 +52,14 @@ export function buildPermissionOverrides(
+   ask?: string[],
+   exclude?: string[],
+   mode?: PermissionMode,
++  toolMode?: ToolMode,
+ ): PermissionOverrides {
+   return {
+     allow,
+     ask,
+     exclude,
+     mode,
++    toolMode,
+   };
+ }
+ 
+@@ -64,12 +70,36 @@ export function buildPermissionOverrides(
+ export function processCommandFlags(options: {
+   readonly?: boolean;
+   auto?: boolean;
++  mode?: string;
++  toolMode?: string;
+   allow?: string[];
+   ask?: string[];
+   exclude?: string[];
+ }): ProcessedFlags {
+-  // Convert legacy flags to mode
+-  const mode = convertLegacyModeFlags(options.readonly, options.auto);
++  // Explicit --mode wins over the legacy --readonly/--auto flags
++  let mode: PermissionMode | undefined;
++  if (options.mode !== undefined) {
++    const requested = options.mode.trim().toLowerCase() as PermissionMode;
++    if (!PERMISSION_MODES.includes(requested)) {
++      throw new Error(
++        `Unknown mode "${options.mode}". Valid modes: ${PERMISSION_MODES.join(", ")}`,
++      );
++    }
++    mode = requested;
++  } else {
++    mode = convertLegacyModeFlags(options.readonly, options.auto);
++  }
++
++  let toolMode: ToolMode | undefined;
++  if (options.toolMode !== undefined) {
++    const requested = options.toolMode.trim().toLowerCase() as ToolMode;
++    if (requested !== "native" && requested !== "text") {
++      throw new Error(
++        `Unknown tool mode "${options.toolMode}". Valid tool modes: native, text`,
++      );
++    }
++    toolMode = requested;
++  }
+ 
+   // Build permission overrides
+   const permissionOverrides = buildPermissionOverrides(
+@@ -77,10 +107,12 @@ export function processCommandFlags(options: {
+     options.ask,
+     options.exclude,
+     mode,
++    toolMode,
+   );
+ 
+   return {
+     mode,
++    toolMode,
+     permissionOverrides,
+   };
+ }
+diff --git a/extensions/cli/src/permissions/types.ts b/extensions/cli/src/permissions/types.ts
+index 610dbd4bf..531507ba5 100644
+--- a/extensions/cli/src/permissions/types.ts
++++ b/extensions/cli/src/permissions/types.ts
+@@ -2,7 +2,16 @@ import { ToolCallPreview } from "../tools/types.js";
+ 
+ export type PermissionPolicy = "allow" | "ask" | "exclude";
+ 
+-export type PermissionMode = "normal" | "plan" | "auto";
++export type PermissionMode = "normal" | "plan" | "auto" | "chat";
++
++/**
++ * How tools are offered to the model:
++ * - "native": OpenAI-style tools parameter (default)
++ * - "text": tools are described in the system message and tool calls are
++ *   parsed from fenced code blocks in the reply - for OpenAI-compatible
++ *   servers whose function calling is unreliable
++ */
++export type ToolMode = "native" | "text";
+ 
+ export interface ToolPermissionPolicy {
+   /** The tool name to match against */
+diff --git a/extensions/cli/src/services/SystemMessageService.ts b/extensions/cli/src/services/SystemMessageService.ts
+index 44ae3098c..fe1ea10b2 100644
+--- a/extensions/cli/src/services/SystemMessageService.ts
++++ b/extensions/cli/src/services/SystemMessageService.ts
+@@ -1,5 +1,6 @@
+-import { PermissionMode } from "../permissions/types.js";
++import { PermissionMode, ToolMode } from "../permissions/types.js";
+ import { constructSystemMessage } from "../systemMessage.js";
++import { TextToolDescription } from "../tools/textToolMode.js";
+ import { logger } from "../util/logger.js";
+ 
+ import { BaseService } from "./BaseService.js";
+@@ -46,7 +47,13 @@ export class SystemMessageService extends BaseService<SystemMessageServiceState>
+   /**
+    * Get a fresh system message with current mode and configuration
+    */
+-  public async getSystemMessage(currentMode: PermissionMode): Promise<string> {
++  public async getSystemMessage(
++    currentMode: PermissionMode,
++    toolOptions?: {
++      toolMode: ToolMode;
++      tools: TextToolDescription[];
++    },
++  ): Promise<string> {
+     const { additionalRules, format, headless } = this.currentState;
+ 
+     const systemMessage = await constructSystemMessage(
+@@ -54,6 +61,9 @@ export class SystemMessageService extends BaseService<SystemMessageServiceState>
+       additionalRules,
+       format,
+       headless,
++      // Keep the 5th argument off the call when unused so strict call
++      // assertions on constructSystemMessage stay stable
++      ...(toolOptions ? [toolOptions] : []),
+     );
+ 
+     logger.debug("Generated fresh system message", {
+diff --git a/extensions/cli/src/services/ToolPermissionService.ts b/extensions/cli/src/services/ToolPermissionService.ts
+index edd8cf195..334de011a 100644
+--- a/extensions/cli/src/services/ToolPermissionService.ts
++++ b/extensions/cli/src/services/ToolPermissionService.ts
+@@ -7,6 +7,7 @@ import { ensurePermissionsYamlExists } from "../permissions/permissionsYamlLoade
+ import { resolvePermissionPrecedence } from "../permissions/precedenceResolver.js";
+ import {
+   PermissionMode,
++  ToolMode,
+   ToolPermissionPolicy,
+   ToolPermissions,
+ } from "../permissions/types.js";
+@@ -26,6 +27,7 @@ export interface InitializeToolServiceOverrides {
+   ask?: string[];
+   exclude?: string[];
+   mode?: PermissionMode;
++  toolMode?: ToolMode;
+   isHeadless?: boolean;
+ }
+ 
+@@ -33,6 +35,7 @@ export interface ToolPermissionServiceState {
+   permissions: ToolPermissions;
+   currentMode: PermissionMode;
+   isHeadless: boolean;
++  toolMode: ToolMode;
+   modePolicyCount?: number; // Track how many policies are from mode vs other sources
+   originalPolicies?: ToolPermissions; // Store original policies when switching modes
+ }
+@@ -49,6 +52,7 @@ export class ToolPermissionService
+       permissions: { policies: [] },
+       currentMode: "normal",
+       isHeadless: false,
++      toolMode: "native",
+       modePolicyCount: 0,
+     });
+   }
+@@ -175,6 +179,10 @@ export class ToolPermissionService
+         return [...PLAN_MODE_POLICIES];
+       case "auto":
+         return [...AUTO_MODE_POLICIES];
++      case "chat":
++        // Chat mode offers no tools at all; getRequestTools returns an empty
++        // list and the system message omits tool instructions.
++        return [];
+       case "normal":
+       default:
+         // Normal mode uses the more nuanced policy loading
+@@ -198,6 +206,11 @@ export class ToolPermissionService
+       this.setState({ currentMode: runtimeOverrides.mode });
+     }
+ 
++    // Set the tool declaration mode (native vs text protocol)
++    if (runtimeOverrides?.toolMode) {
++      this.setState({ toolMode: runtimeOverrides.toolMode });
++    }
++
+     // Set headless flag from overrides
+     if (runtimeOverrides?.isHeadless !== undefined) {
+       this.setState({ isHeadless: runtimeOverrides.isHeadless });
+@@ -285,7 +298,6 @@ export class ToolPermissionService
+   switchMode(newMode: PermissionMode): ToolPermissionServiceState {
+     const currentMode = this.currentState.currentMode;
+     logger.debug(`Switching from mode '${currentMode}' to '${newMode}'`);
+-
+     // Store original policies when leaving normal mode for the first time
+     if (
+       currentMode === "normal" &&
+@@ -355,6 +367,18 @@ export class ToolPermissionService
+     return this.getState();
+   }
+ 
++  /**
++   * Switch how tools are offered to the model (native tools parameter vs
++   * text protocol in the system message). Independent of the permission mode.
++   */
++  switchToolMode(toolMode: ToolMode): ToolPermissionServiceState {
++    const previous = this.currentState.toolMode;
++    logger.debug(`Switching tool mode from '${previous}' to '${toolMode}'`);
++    this.setState({ toolMode });
++    this.emit("toolModeChanged", toolMode, previous);
++    return this.getState();
++  }
++
+   /**
+    * Get the current permission mode
+    */
+diff --git a/extensions/cli/src/services/index.ts b/extensions/cli/src/services/index.ts
+index 97cce5dda..36ed7e678 100644
+--- a/extensions/cli/src/services/index.ts
++++ b/extensions/cli/src/services/index.ts
+@@ -152,6 +152,9 @@ export async function initializeServices(initOptions: ServiceInitOptions = {}) {
+         if (overrides.mode) {
+           initArgs.mode = overrides.mode;
+         }
++        if (overrides.toolMode) {
++          initArgs.toolMode = overrides.toolMode;
++        }
+         // If mode is "normal" or undefined, no flags are set
+         return await toolPermissionService.initialize(
+           initArgs,
+diff --git a/extensions/cli/src/services/types.ts b/extensions/cli/src/services/types.ts
+index ae5c38971..81192094a 100644
+--- a/extensions/cli/src/services/types.ts
++++ b/extensions/cli/src/services/types.ts
+@@ -12,7 +12,7 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
+ 
+ import type { AuthConfig } from "../auth/workos.js";
+ import { BaseCommandOptions } from "../commands/BaseCommandOptions.js";
+-import { PermissionMode } from "../permissions/types.js";
++import { PermissionMode, ToolMode } from "../permissions/types.js";
+ 
+ import { type MCPService } from "./MCPService.js";
+ 
+@@ -174,6 +174,7 @@ export interface ServiceInitOptions {
+     ask?: string[];
+     exclude?: string[];
+     mode?: PermissionMode;
++    toolMode?: ToolMode;
+   };
+ }
+ 
+diff --git a/extensions/cli/src/shared-options.ts b/extensions/cli/src/shared-options.ts
+index 43f00b2db..92740290c 100644
+--- a/extensions/cli/src/shared-options.ts
++++ b/extensions/cli/src/shared-options.ts
+@@ -13,6 +13,14 @@ export function addCommonOptions(command: Command): Command {
+     )
+     .option("--readonly", "Start in plan mode (read-only tools)")
+     .option("--auto", "Start in auto mode (all tools allowed)")
++    .option(
++      "--mode <mode>",
++      "Start in a specific mode: chat (no tools, plain conversation), normal (agent with approvals), plan (read-only) or auto (all tools allowed)",
++    )
++    .option(
++      "--tool-mode <toolMode>",
++      "How tools are offered to the model: native (default, tools parameter) or text (tools described in the system message and calls parsed from the reply - for OpenAI-compatible servers with unreliable function calling). Can also be switched at runtime with /tool-mode",
++    )
+     .option("--verbose", "Enable verbose logging")
+     .option("--beta-status-tool", "Enable beta status tool")
+     .option(
+@@ -102,6 +110,8 @@ export function mergeParentOptions(parentCommand: Command, options: any): any {
+     "org",
+     "readonly",
+     "auto",
++    "mode",
++    "toolMode",
+     "tools",
+     "verbose",
+     "rule",
+diff --git a/extensions/cli/src/slashCommands.ts b/extensions/cli/src/slashCommands.ts
+index 1eb612553..9dce50534 100644
+--- a/extensions/cli/src/slashCommands.ts
++++ b/extensions/cli/src/slashCommands.ts
+@@ -9,7 +9,9 @@ import { v4 as uuidv4 } from "uuid";
+ import { getAllSlashCommands } from "./commands/commands.js";
+ import { handleInit } from "./commands/init.js";
+ import { handleInfoSlashCommand } from "./infoScreen.js";
++import { ToolMode } from "./permissions/types.js";
+ import { getCurrentSession, updateSessionTitle } from "./session.js";
++import { services } from "./services/index.js";
+ import { telemetryService } from "./telemetry/telemetryService.js";
+ import { buildImportSkillPrompt } from "./tools/skills.js";
+ import { SlashCommandResult } from "./ui/hooks/useChat.types.js";
+@@ -39,7 +41,8 @@ async function handleHelp(_args: string[], _assistant: AssistantConfig) {
+     `  ${chalk.cyan("Ctrl+C")}     Clear input`,
+     `  ${chalk.cyan("Ctrl+D")}     Exit application`,
+     `  ${chalk.cyan("Ctrl+L")}     Clear screen`,
+-    `  ${chalk.cyan("Shift+Tab")}  Cycle permission modes (normal/plan/auto)`,
++    `  ${chalk.cyan("Shift+Tab")}  Cycle permission modes (normal/plan/auto/chat)`,
++    `  ${chalk.cyan("/tool-mode")} Switch tool calling: native or text`,
+     `  ${chalk.cyan("Esc")}        Cancel streaming or close suggestions`,
+     "",
+     chalk.white("Special Characters:"),
+@@ -288,6 +291,20 @@ const commandHandlers: Record<string, CommandHandler> = {
+   jobs: handleJobs,
+   skills: () => handleSkills(),
+   "import-skill": (args) => handleImportSkill(args),
++  "tool-mode": async (args) => {
++    const state = services.toolPermissions.getState();
++    const arg = (args[0] ?? "").trim().toLowerCase();
++    const next: ToolMode =
++      arg === "native" || arg === "text"
++        ? (arg as ToolMode)
++        : state.toolMode === "text"
++          ? "native"
++          : "text";
++    services.toolPermissions.switchToolMode(next);
++    return {
++      output: `Tool mode: ${next === "text" ? "text (tools described in the system message, calls parsed from the reply)" : "native (tools parameter)"}`,
++    };
++  },
+   sessions: handleSessions,
+   export: handleExport,
+   import: handleImport,
+diff --git a/extensions/cli/src/stream/handleToolCalls.ts b/extensions/cli/src/stream/handleToolCalls.ts
+index c58206b56..42fa69a41 100644
+--- a/extensions/cli/src/stream/handleToolCalls.ts
++++ b/extensions/cli/src/stream/handleToolCalls.ts
+@@ -170,13 +170,18 @@ export async function handleToolCalls(
+ }
+ 
+ export async function getRequestTools(isHeadless: boolean) {
+-  const availableTools = await getAllAvailableTools(isHeadless);
+-
+   const permissionsState =
+     await serviceContainer.get<ToolPermissionServiceState>(
+       SERVICE_NAMES.TOOL_PERMISSIONS,
+     );
+ 
++  // Chat mode is a plain conversation: no tools are offered to the model.
++  if (permissionsState.currentMode === "chat") {
++    return [];
++  }
++
++  const availableTools = await getAllAvailableTools(isHeadless);
++
+   const allowedTools: Tool[] = [];
+   for (const tool of availableTools) {
+     const result = checkToolPermission(
+diff --git a/extensions/cli/src/stream/streamChatResponse.ts b/extensions/cli/src/stream/streamChatResponse.ts
+index 201566633..12e959df6 100644
+--- a/extensions/cli/src/stream/streamChatResponse.ts
++++ b/extensions/cli/src/stream/streamChatResponse.ts
+@@ -12,6 +12,11 @@ import { pruneLastMessage } from "../compaction.js";
+ import { services } from "../services/index.js";
+ import { telemetryService } from "../telemetry/telemetryService.js";
+ import { applyChatCompletionToolOverrides } from "../tools/applyToolOverrides.js";
++import { ToolMode } from "../permissions/types.js";
++import {
++  chatCompletionToolToDescription,
++  extractToolCallsFromText,
++} from "../tools/textToolMode.js";
+ import { ToolCall } from "../tools/index.js";
+ import {
+   chatCompletionStreamWithBackoff,
+@@ -189,6 +194,7 @@ interface ProcessStreamingResponseOptions {
+   callbacks?: StreamCallbacks;
+   isHeadless?: boolean;
+   tools?: ChatCompletionTool[];
++  toolMode?: ToolMode;
+   systemMessage: string;
+ }
+ 
+@@ -210,6 +216,7 @@ export async function processStreamingResponse(
+     callbacks,
+     isHeadless,
+     tools,
++    toolMode = "native",
+     systemMessage,
+   } = options;
+ 
+@@ -261,6 +268,7 @@ export async function processStreamingResponse(
+       model,
+       messageCount: chatHistory.length,
+       toolCount: tools?.length || 0,
++      toolMode,
+     });
+     return await chatCompletionStreamWithBackoff(
+       llmApi,
+@@ -268,7 +276,10 @@ export async function processStreamingResponse(
+         model: model.model,
+         messages: openaiChatHistory,
+         stream: true,
+-        tools,
++        // In text tool mode the tools are described in the system message and
++        // parsed from the reply - the native tools parameter must stay empty
++        // so that strict OpenAI-compatible servers never see it.
++        tools: toolMode === "text" ? undefined : tools,
+         ...getDefaultCompletionOptions(model.defaultCompletionOptions),
+       },
+       retryAbortSignal,
+@@ -393,7 +404,7 @@ export async function processStreamingResponse(
+   const toolCalls = Array.from(toolCallsMap.values());
+ 
+   // Validate tool calls have complete arguments
+-  const validToolCalls = toolCalls.filter((tc) => {
++  let validToolCalls = toolCalls.filter((tc) => {
+     if (!tc.name) {
+       logger.error("Incomplete tool call", {
+         id: tc.id,
+@@ -406,6 +417,25 @@ export async function processStreamingResponse(
+     return true;
+   });
+ 
++  // Text tool mode: when no native tool calls were streamed, parse tool
++  // calls from fenced code blocks in the reply
++  if (toolMode === "text" && validToolCalls.length === 0 && tools?.length) {
++    const allowedNames = new Set(
++      tools.map((t) => t.function?.name).filter((n): n is string => !!n),
++    );
++    const { toolCalls: textToolCalls, hasToolCalls } = extractToolCallsFromText(
++      aiResponse,
++      allowedNames,
++    );
++    if (hasToolCalls) {
++      logger.debug("Parsed tool calls from text tool mode", {
++        count: textToolCalls.length,
++        names: textToolCalls.map((tc) => tc.name),
++      });
++      validToolCalls = textToolCalls;
++    }
++  }
++
+   // Always preserve the content - it should be displayed regardless of tool calls
+   finalContent = aiResponse;
+ 
+@@ -445,18 +475,25 @@ export async function streamChatResponse(
+     chatHistory = refreshChatHistoryFromService(chatHistory, isCompacting);
+     logger.debug("Starting conversation iteration");
+ 
+-    // Get system message once per iteration (can change based on tool permissions mode)
+-    const systemMessage = await services.systemMessage.getSystemMessage(
+-      services.toolPermissions.getState().currentMode,
+-    );
+-
+     // Recompute tools on each iteration to handle mode changes during streaming
++    const permissionState = services.toolPermissions.getState();
++    const toolMode: ToolMode = permissionState.toolMode ?? "native";
+     const rawTools = await getRequestTools(isHeadless);
+     const tools = applyChatCompletionToolOverrides(
+       rawTools,
+       model.chatOptions?.toolOverrides,
+     );
+ 
++    // Get system message once per iteration (can change based on tool
++    // permissions mode and tool declaration mode)
++    const systemMessage = await services.systemMessage.getSystemMessage(
++      permissionState.currentMode,
++      {
++        toolMode,
++        tools: tools.map(chatCompletionToolToDescription),
++      },
++    );
++
+     // Pre-API auto-compaction checkpoint (now includes tools)
+     const preCompactionResult = await handlePreApiCompaction(chatHistory, {
+       model,
+@@ -487,6 +524,7 @@ export async function streamChatResponse(
+         abortController,
+         callbacks,
+         tools,
++        toolMode,
+         systemMessage,
+       });
+ 
+diff --git a/extensions/cli/src/systemMessage.ts b/extensions/cli/src/systemMessage.ts
+index bdfbfbba0..1482cd237 100644
+--- a/extensions/cli/src/systemMessage.ts
++++ b/extensions/cli/src/systemMessage.ts
+@@ -6,9 +6,13 @@ import { parseMarkdownRule, RuleObject } from "@continuedev/config-yaml";
+ 
+ import { env } from "./env.js";
+ import { processRule } from "./hubLoader.js";
+-import { PermissionMode } from "./permissions/types.js";
++import { PermissionMode, ToolMode } from "./permissions/types.js";
+ import { serviceContainer } from "./services/ServiceContainer.js";
+ import { ConfigServiceState, SERVICE_NAMES } from "./services/types.js";
++import {
++  buildTextToolsInstructions,
++  TextToolDescription,
++} from "./tools/textToolMode.js";
+ 
+ /**
+  * Check if current directory is a git repository
+@@ -163,6 +167,10 @@ export async function constructSystemMessage(
+   additionalRules?: string[],
+   format?: "json",
+   headless?: boolean,
++  toolOptions?: {
++    toolMode: ToolMode;
++    tools: TextToolDescription[];
++  },
+ ): Promise<string> {
+   const agentFiles = ["AGENTS.md", "AGENT.md", "CLAUDE.md", "CODEX.md"];
+ 
+@@ -214,13 +222,20 @@ export async function constructSystemMessage(
+   // Construct the comprehensive system message
+   let systemMessage = baseSystemMessage;
+ 
++  // Chat mode is a plain conversation without tools
++  if (mode === "chat") {
++    systemMessage = `You are an assistant in the Continue CLI. Answer the user's questions directly and helpfully. You have no tools available in this mode: do not attempt to read, write or run anything - simply answer from your own knowledge.
++
++If the user's request requires acting on files or running commands, ask them to switch back to agent mode with Shift+Tab.`;
++  }
++
+   // Add plan mode specific instructions if in plan mode
+   if (mode === "plan") {
+     systemMessage +=
+       '\n<context name="planMode">You are operating in _Plan Mode_, which means that your goal is to help the user investigate their ideas and develop a plan before taking action. You only have access to read-only tools and should not attempt to circumvent them to write / delete / create files. Ask the user to switch to agent mode if they want to make changes. For example, it is not acceptable to use the Bash tool to write to files.</context>\n';
+   } else {
+     // Check if commit signature is disabled via environment variable
+-    if (!process.env.CONTINUE_CLI_DISABLE_COMMIT_SIGNATURE) {
++    if (!process.env.CONTINUE_CLI_DISABLE_COMMIT_SIGNATURE && mode !== "chat") {
+       systemMessage += `\n<context name="commitSignature">When creating commits using any CLI or tool, include the following in the commit message:
+ Generated with [Continue](https://continue.dev)
+ 
+@@ -229,6 +244,16 @@ Co-Authored-By: Continue <noreply@continue.dev>
+     }
+   }
+ 
++  // In text tool mode, tools are described here instead of the native
++  // tools parameter of the API request
++  if (
++    mode !== "chat" &&
++    toolOptions?.toolMode === "text" &&
++    toolOptions.tools.length > 0
++  ) {
++    systemMessage += buildTextToolsInstructions(toolOptions.tools);
++  }
++
+   // In headless mode, add instructions to be concise and only provide final answers
+   if (headless) {
+     systemMessage += `
+diff --git a/extensions/cli/src/tools/textToolMode.test.ts b/extensions/cli/src/tools/textToolMode.test.ts
+new file mode 100644
+index 000000000..0205925a5
+--- /dev/null
++++ b/extensions/cli/src/tools/textToolMode.test.ts
+@@ -0,0 +1,137 @@
++import { describe, expect, it } from "vitest";
++
++import {
++  buildTextToolsInstructions,
++  extractToolCallsFromText,
++} from "./textToolMode.js";
++
++const allowed = new Set(["read_file", "run_terminal_command", "fetch"]);
++
++describe("extractToolCallsFromText", () => {
++  it("parses a single tool fence", () => {
++    const content = `Let me read that file.
++
++\`\`\`tool
++{"name": "read_file", "arguments": {"filepath": "src/index.ts"}}
++\`\`\``;
++
++    const { toolCalls, hasToolCalls } = extractToolCallsFromText(
++      content,
++      allowed,
++    );
++
++    expect(hasToolCalls).toBe(true);
++    expect(toolCalls).toHaveLength(1);
++    expect(toolCalls[0].name).toBe("read_file");
++    expect(toolCalls[0].arguments).toEqual({ filepath: "src/index.ts" });
++    expect(toolCalls[0].argumentsStr).toContain("filepath");
++    expect(toolCalls[0].startNotified).toBe(false);
++  });
++
++  it("parses multiple sequential tool fences", () => {
++    const content = `Two steps:
++
++\`\`\`tool
++{"name": "read_file", "arguments": {"filepath": "a.ts"}}
++\`\`\`
++
++Some explanation in between.
++
++\`\`\`tool
++{"name": "fetch", "arguments": {"url": "https://example.com"}}
++\`\`\``;
++
++    const { toolCalls } = extractToolCallsFromText(content, allowed);
++
++    expect(toolCalls).toHaveLength(2);
++    expect(toolCalls[0].name).toBe("read_file");
++    expect(toolCalls[1].name).toBe("fetch");
++  });
++
++  it("tolerates a json fence with a valid tool object", () => {
++    const content = `\`\`\`json
++{"name": "run_terminal_command", "arguments": {"command": "ls"}}
++\`\`\``;
++
++    const { toolCalls } = extractToolCallsFromText(content, allowed);
++
++    expect(toolCalls).toHaveLength(1);
++    expect(toolCalls[0].name).toBe("run_terminal_command");
++  });
++
++  it("ignores unknown tool names and regular code blocks", () => {
++    const content = `Here is some code:
++
++\`\`\`ts
++const x = 1;
++\`\`\`
++
++\`\`\`tool
++{"name": "delete_everything", "arguments": {}}
++\`\`\`
++
++\`\`\`tool
++not json at all
++\`\`\``;
++
++    const { toolCalls, hasToolCalls } = extractToolCallsFromText(
++      content,
++      allowed,
++    );
++
++    expect(hasToolCalls).toBe(false);
++    expect(toolCalls).toHaveLength(0);
++  });
++
++  it("returns no calls for a plain answer", () => {
++    const { toolCalls, hasToolCalls } = extractToolCallsFromText(
++      "The answer is 42.",
++      allowed,
++    );
++
++    expect(hasToolCalls).toBe(false);
++    expect(toolCalls).toHaveLength(0);
++  });
++
++  it("accepts string arguments and normalizes them", () => {
++    const content = `\`\`\`tool
++{"name": "read_file", "arguments": "{\\"filepath\\": \\"b.ts\\"}"}
++\`\`\``;
++
++    const { toolCalls } = extractToolCallsFromText(content, allowed);
++
++    expect(toolCalls).toHaveLength(1);
++    expect(toolCalls[0].arguments).toEqual({ filepath: "b.ts" });
++  });
++});
++
++describe("buildTextToolsInstructions", () => {
++  it("documents the fence protocol and every tool", () => {
++    const instructions = buildTextToolsInstructions([
++      {
++        name: "read_file",
++        displayName: "Read File",
++        description: "Reads the contents of a file",
++        parameters: {
++          type: "object",
++          properties: {
++            filepath: { type: "string", description: "The path to read" },
++          },
++          required: ["filepath"],
++        },
++        run: async () => "",
++        isBuiltIn: true,
++      } as any,
++    ]);
++
++    expect(instructions).toContain('language identifier "tool"');
++    expect(instructions).toContain("**read_file**");
++    expect(instructions).toContain("Reads the contents of a file");
++    expect(instructions).toContain("Required: filepath");
++    expect(instructions).toContain("```tool");
++  });
++
++  it("returns an empty string when no tools are available", () => {
++    expect(buildTextToolsInstructions([])).toBe("");
++  });
++});
+diff --git a/extensions/cli/src/tools/textToolMode.ts b/extensions/cli/src/tools/textToolMode.ts
+new file mode 100644
+index 000000000..609ed060f
+--- /dev/null
++++ b/extensions/cli/src/tools/textToolMode.ts
+@@ -0,0 +1,162 @@
++/**
++ * Text tool mode: tools are described in the system message and tool calls
++ * are parsed from fenced code blocks in the model's reply, instead of using
++ * the OpenAI-style `tools` parameter (native function calling).
++ *
++ * This is the escape hatch for OpenAI-compatible servers whose function
++ * calling is unreliable (LM Studio, llama.cpp, small local models, proxies).
++ */
++
++import { Tool, ToolCall } from "./types.js";
++
++export const TEXT_TOOL_FENCE = "tool";
++
++/**
++ * Minimal shape needed to describe a tool in the system message. Accepts
++ * both the internal Tool shape and the ChatCompletionTool shape.
++ */
++export interface TextToolDescription {
++  name: string;
++  description: string;
++  parameters: any;
++}
++
++export function chatCompletionToolToDescription(
++  tool: ChatCompletionToolLike,
++): TextToolDescription {
++  return {
++    name: tool.function?.name ?? "",
++    description: tool.function?.description ?? "",
++    parameters: tool.function?.parameters ?? {},
++  };
++}
++
++export interface ChatCompletionToolLike {
++  function?: {
++    name?: string;
++    description?: string;
++    parameters?: any;
++  };
++}
++
++/**
++ * Builds the system message section that describes how to call tools in
++ * text mode. Mirrors the semantics of the GUI's system-message tools
++ * framework (one fenced block per call, sequential execution).
++ */
++export function buildTextToolsInstructions(
++  tools: TextToolDescription[],
++): string {
++  if (tools.length === 0) {
++    return "";
++  }
++
++  const toolDocs = tools
++    .map((tool) => {
++      const params = tool.parameters?.properties
++        ? Object.entries(tool.parameters.properties)
++            .map(
++              ([key, schema]: [string, any]) =>
++                `- ${key}${schema?.type ? ` (${schema.type})` : ""}${schema?.description ? `: ${schema.description}` : ""}`,
++            )
++            .join("\n")
++        : "- (no parameters)";
++      const required = tool.parameters?.required?.length
++        ? `\n  Required: ${tool.parameters.required.join(", ")}`
++        : "";
++      return `- **${tool.name}**: ${tool.description}\n  Parameters:\n${params}${required}`;
++    })
++    .join("\n\n");
++
++  const example = JSON.stringify({
++    name: tools[0].name,
++    arguments: {},
++  });
++
++  return `
++
++<context name="toolCalling">
++# Tool calling
++
++Native tool calling is disabled for this session. You call tools by writing
++ONE fenced code block per tool call, with the language identifier "${TEXT_TOOL_FENCE}",
++and a single JSON object as the body:
++
++\`\`\`${TEXT_TOOL_FENCE}
++${example}
++\`\`\`
++
++Rules:
++- Exactly one JSON object per code block, with "name" (string) and "arguments" (object).
++- Multiple tool calls: write several code blocks; they run in the order written.
++- Do not wrap tool calls in any other text structure; do not put them inside other code blocks.
++- After each call you will receive the result and can continue.
++- If you do not need a tool, simply answer normally without any "${TEXT_TOOL_FENCE}" block.
++
++Available tools:
++
++${toolDocs}
++</context>
++`;
++}
++
++/**
++ * Extracts tool calls from a completed reply written in text tool mode.
++ * Recognizes fences of the form ```tool ... ``` (and tolerates ```json ...
++ * ``` when the body parses to a {name, arguments} object whose name is a
++ * known tool). Unknown names and non-JSON blocks are left alone.
++ */
++export function extractToolCallsFromText(
++  content: string,
++  allowedToolNames: Set<string>,
++): { toolCalls: ToolCall[]; hasToolCalls: boolean } {
++  const toolCalls: ToolCall[] = [];
++  const fenceRegex = /```([^\n`]*)\n([\s\S]*?)```/g;
++
++  let match: RegExpExecArray | null;
++  while ((match = fenceRegex.exec(content)) !== null) {
++    const info = (match[1] ?? "").trim().toLowerCase();
++    const body = (match[2] ?? "").trim();
++    if (info !== TEXT_TOOL_FENCE && info !== "json") {
++      continue;
++    }
++
++    let parsed: any;
++    try {
++      parsed = JSON.parse(body);
++    } catch {
++      continue;
++    }
++
++    const name =
++      typeof parsed?.name === "string" ? (parsed.name as string) : undefined;
++    if (!name || !allowedToolNames.has(name)) {
++      continue;
++    }
++
++    let args = parsed?.arguments;
++    if (typeof args === "string") {
++      try {
++        args = JSON.parse(args);
++      } catch {
++        args = {};
++      }
++    }
++    if (args === null || args === undefined) {
++      args = {};
++    }
++    if (typeof args !== "object" || Array.isArray(args)) {
++      continue;
++    }
++
++    toolCalls.push({
++      id: `text_tool_call_${toolCalls.length}`,
++      name,
++      arguments: args,
++      argumentsStr: JSON.stringify(args),
++      startNotified: false,
++    });
++  }
++
++  return { toolCalls, hasToolCalls: toolCalls.length > 0 };
++}
+diff --git a/extensions/cli/src/ui/UserInput.tsx b/extensions/cli/src/ui/UserInput.tsx
+index adbb12cd4..21aafc847 100644
+--- a/extensions/cli/src/ui/UserInput.tsx
++++ b/extensions/cli/src/ui/UserInput.tsx
+@@ -204,7 +204,7 @@ const UserInput: React.FC<UserInputProps> = ({
+ 
+   // Cycle through permission modes
+   const cycleModes = async () => {
+-    const modes: PermissionMode[] = ["normal", "plan", "auto"];
++    const modes: PermissionMode[] = ["normal", "plan", "auto", "chat"];
+     const currentMode = services.toolPermissions.getCurrentMode();
+     const currentIndex = modes.indexOf(currentMode);
+     const nextIndex = (currentIndex + 1) % modes.length;
+diff --git a/extensions/cli/src/ui/components/ModeIndicator.tsx b/extensions/cli/src/ui/components/ModeIndicator.tsx
+index 30cbd558c..1a8716a4b 100644
+--- a/extensions/cli/src/ui/components/ModeIndicator.tsx
++++ b/extensions/cli/src/ui/components/ModeIndicator.tsx
+@@ -29,16 +29,22 @@ const ModeIndicator: React.FC<ModeIndicatorProps> = ({ mode }) => {
+         return { text: "⏸ plan", color: "blue" };
+       case "auto":
+         return { text: "⏵⏵ auto", color: "green" };
++      case "chat":
++        return { text: "💬 chat", color: "magenta" };
+       default:
+         return { text: mode, color: "dim" };
+     }
+   };
+ 
+   const { text, color } = getModeDisplay(currentMode);
++  const toolMode = services.toolPermissions?.toolMode;
++  const toolModeText =
++    toolMode === "text" && currentMode !== "chat" ? " · tools:text" : "";
+ 
+   return (
+     <Text color={color} dimColor={false}>
+-      [{text}]
++      [{text}
++      {toolModeText}]
+     </Text>
+   );
+ };
+-- 
+2.53.0
+
+
+From 825aa49b87bcb88beabe27c87f14ecc15ece9865 Mon Sep 17 00:00:00 2001
+From: sam <sam@local>
+Date: Tue, 17 Nov 2026 23:07:01 +0100
+Subject: [PATCH 2/4] feat(cli): mid-stream resilience + live streaming display
+
+Modeled on Gemini CLI's mid-stream retries (geminiChat.ts):
+
+- processStreamingResponse consumes the stream through
+  consumeStreamWithResilience (new streamResilience.ts): retryable
+  mid-stream failures (429, 5xx, dropped connections) are retried up to
+  3 times with 1s/2s/4s backoff instead of surfacing an error immediately
+- continuation: when the failed attempt produced a partial answer, the
+  retry sends it back as an assistant prefill so the model CONTINUES
+  where it stopped (no regeneration, no duplicated content - the
+  accumulated state now persists across attempts); a thinking-only or
+  empty stream is retried with an explicit "provide your final answer"
+  nudge instead of returning silence, and the error surfaces once the
+  retry budget is exhausted
+- per-chunk idle watchdog (default 120s, CONTINUE_CLI_IDLE_TIMEOUT_MS,
+  0 = off): a stalled/overloaded server is treated as a retryable
+  failure instead of hanging the session forever
+- onStreamReset callback lets the UI clear the partial display of a
+  discarded attempt (Gemini's RETRY event pattern)
+- live streaming: the TUI now renders the in-progress assistant content,
+  flushed at most every 120ms (bounded re-render cost) instead of only
+  showing the reply when it completes
+---
+ .../cli/src/stream/streamChatResponse.ts      | 244 ++-------
+ .../src/stream/streamChatResponse.types.ts    |   3 +
+ .../cli/src/stream/streamResilience.test.ts   | 153 ++++++
+ extensions/cli/src/stream/streamResilience.ts | 499 ++++++++++++++++++
+ extensions/cli/src/ui/TUIChat.tsx             |  12 +
+ .../src/ui/hooks/useChat.stream.helpers.ts    |  35 +-
+ extensions/cli/src/ui/hooks/useChat.ts        |   6 +
+ extensions/cli/src/util/exponentialBackoff.ts |  25 +
+ 8 files changed, 763 insertions(+), 214 deletions(-)
+ create mode 100644 extensions/cli/src/stream/streamResilience.test.ts
+ create mode 100644 extensions/cli/src/stream/streamResilience.ts
+
+diff --git a/extensions/cli/src/stream/streamChatResponse.ts b/extensions/cli/src/stream/streamChatResponse.ts
+index 12e959df6..cc954bb07 100644
+--- a/extensions/cli/src/stream/streamChatResponse.ts
++++ b/extensions/cli/src/stream/streamChatResponse.ts
+@@ -9,20 +9,15 @@ import type {
+ } from "openai/resources.mjs";
+ 
+ import { pruneLastMessage } from "../compaction.js";
++import { ToolMode } from "../permissions/types.js";
+ import { services } from "../services/index.js";
+-import { telemetryService } from "../telemetry/telemetryService.js";
+ import { applyChatCompletionToolOverrides } from "../tools/applyToolOverrides.js";
+-import { ToolMode } from "../permissions/types.js";
++import { ToolCall } from "../tools/index.js";
+ import {
+   chatCompletionToolToDescription,
+   extractToolCallsFromText,
+ } from "../tools/textToolMode.js";
+-import { ToolCall } from "../tools/index.js";
+-import {
+-  chatCompletionStreamWithBackoff,
+-  isContextLengthError,
+-  withExponentialBackoff,
+-} from "../util/exponentialBackoff.js";
++import { isContextLengthError } from "../util/exponentialBackoff.js";
+ import { logger } from "../util/logger.js";
+ import { validateContextLength } from "../util/tokenizer.js";
+ 
+@@ -32,16 +27,9 @@ import {
+   handlePostToolValidation,
+   handlePreApiCompaction,
+ } from "./streamChatResponse.compactionHelpers.js";
+-import {
+-  processChunkContent,
+-  processToolCallDelta,
+-  recordStreamTelemetry,
+-  trackFirstTokenTime,
+-} from "./streamChatResponse.helpers.js";
+-import {
+-  getDefaultCompletionOptions,
+-  StreamCallbacks,
+-} from "./streamChatResponse.types.js";
++import { StreamCallbacks } from "./streamChatResponse.types.js";
++import { consumeStreamWithResilience } from "./streamResilience.js";
++import type { ResilientStreamResult } from "./streamResilience.js";
+ 
+ dotenv.config();
+ 
+@@ -132,60 +120,6 @@ function handleAutoContinuation(
+   return { shouldAutoContinue: true, chatHistory };
+ }
+ 
+-// Helper function to process a single chunk
+-interface ProcessChunkOptions {
+-  chunk: any;
+-  aiResponse: string;
+-  toolCallsMap: Map<string, ToolCall>;
+-  indexToIdMap: Map<number, string>;
+-  callbacks?: StreamCallbacks;
+-  isHeadless?: boolean;
+-}
+-
+-function processChunk(options: ProcessChunkOptions): {
+-  aiResponse: string;
+-  shouldContinue: boolean;
+-} {
+-  const {
+-    chunk,
+-    aiResponse,
+-    toolCallsMap,
+-    indexToIdMap,
+-    callbacks,
+-    isHeadless,
+-  } = options;
+-  // Safety check: ensure chunk has the expected structure
+-  if (!chunk.choices || !chunk.choices[0]) {
+-    return { aiResponse, shouldContinue: true };
+-  }
+-
+-  const choice = chunk.choices[0];
+-  if (!choice.delta) {
+-    return { aiResponse, shouldContinue: true };
+-  }
+-
+-  let updatedResponse = aiResponse;
+-
+-  // Handle content streaming
+-  if (choice.delta.content) {
+-    updatedResponse = processChunkContent(
+-      choice.delta.content,
+-      aiResponse,
+-      callbacks,
+-      isHeadless,
+-    );
+-  }
+-
+-  // Handle tool calls
+-  if (choice.delta.tool_calls) {
+-    for (const toolCallDelta of choice.delta.tool_calls) {
+-      processToolCallDelta(toolCallDelta, toolCallsMap, indexToIdMap);
+-    }
+-  }
+-
+-  return { aiResponse: updatedResponse, shouldContinue: true };
+-}
+-
+ interface ProcessStreamingResponseOptions {
+   chatHistory: ChatHistoryItem[];
+   model: ModelConfig;
+@@ -199,7 +133,7 @@ interface ProcessStreamingResponseOptions {
+ }
+ 
+ // Process a single streaming response and return whether we need to continue
+-// eslint-disable-next-line max-statements, complexity
++
+ export async function processStreamingResponse(
+   options: ProcessStreamingResponseOptions,
+ ): Promise<{
+@@ -263,159 +197,45 @@ export async function processStreamingResponse(
+   ) as ChatCompletionMessageParam[];
+   const requestStartTime = Date.now();
+ 
+-  const streamFactory = async (retryAbortSignal: AbortSignal) => {
+-    logger.debug("Creating chat completion stream", {
+-      model,
+-      messageCount: chatHistory.length,
+-      toolCount: tools?.length || 0,
+-      toolMode,
+-    });
+-    return await chatCompletionStreamWithBackoff(
+-      llmApi,
+-      {
+-        model: model.model,
+-        messages: openaiChatHistory,
+-        stream: true,
+-        // In text tool mode the tools are described in the system message and
+-        // parsed from the reply - the native tools parameter must stay empty
+-        // so that strict OpenAI-compatible servers never see it.
+-        tools: toolMode === "text" ? undefined : tools,
+-        ...getDefaultCompletionOptions(model.defaultCompletionOptions),
+-      },
+-      retryAbortSignal,
+-    );
+-  };
+-
+-  let aiResponse = "";
+-  let finalContent = "";
+-  const toolCallsMap = new Map<string, ToolCall>();
+-  const indexToIdMap = new Map<number, string>(); // Track index to ID mapping
+-  let firstTokenTime: number | null = null;
+-  let inputTokens = 0;
+-  let outputTokens = 0;
+-  let fullUsage: any = null;
+-
++  // Consume the stream with mid-stream resilience (retry + continuation +
++  // idle watchdog - see streamResilience.ts)
++  let streamResult: ResilientStreamResult;
+   try {
+-    const streamWithBackoff = withExponentialBackoff(
+-      streamFactory,
+-      abortController.signal,
+-    );
+-
+-    let chunkCount = 0;
+-    for await (const chunk of streamWithBackoff) {
+-      chunkCount++;
+-
+-      logger.debug("Received chunk", { chunkCount, chunk });
+-
+-      // Track token usage if available
+-      if (chunk.usage) {
+-        inputTokens = chunk.usage.prompt_tokens || 0;
+-        outputTokens = chunk.usage.completion_tokens || 0;
+-        fullUsage = chunk.usage; // Capture full usage including cache details
+-      }
+-
+-      // Check if we should abort
+-      if (abortController?.signal.aborted) {
+-        logger.debug("Stream aborted");
+-        break;
+-      }
+-
+-      // Track first token time
+-      firstTokenTime = trackFirstTokenTime(
+-        firstTokenTime,
+-        chunk,
+-        requestStartTime,
+-        model,
+-        tools,
+-      );
+-
+-      const result = processChunk({
+-        chunk,
+-        aiResponse,
+-        toolCallsMap,
+-        indexToIdMap,
+-        callbacks,
+-        isHeadless,
+-      });
+-      aiResponse = result.aiResponse;
+-      if (!result.shouldContinue) break;
+-    }
+-
+-    const responseEndTime = Date.now();
+-    const cost = recordStreamTelemetry({
+-      requestStartTime,
+-      responseEndTime,
+-      inputTokens,
+-      outputTokens,
++    streamResult = await consumeStreamWithResilience({
++      llmApi,
+       model,
++      abortController,
++      callbacks,
++      isHeadless,
+       tools,
+-      fullUsage,
+-    });
+-    const totalDuration = responseEndTime - requestStartTime;
+-
+-    // Enhance fullUsage with model and cost for saving to session
+-    if (fullUsage) {
+-      fullUsage.model = model.model;
+-      fullUsage.cost_cents = Math.round(cost * 100); // Convert dollars to cents
+-    }
+-
+-    logger.debug("Stream complete", {
+-      chunkCount,
+-      responseLength: aiResponse.length,
+-      toolCallsCount: toolCallsMap.size,
+-      inputTokens,
+-      outputTokens,
+-      cacheReadTokens: fullUsage?.prompt_tokens_details?.cache_read_tokens,
+-      cacheWriteTokens: fullUsage?.prompt_tokens_details?.cache_write_tokens,
+-      cost,
+-      duration: totalDuration,
++      toolMode,
++      baseMessages: openaiChatHistory,
++      requestStartTime,
+     });
+   } catch (error: any) {
+-    const errorDuration = Date.now() - requestStartTime;
+-
+-    // Log failed API request
+-    telemetryService.logApiRequest({
+-      model: model.model,
+-      durationMs: errorDuration,
+-      success: false,
+-      error: error.message || String(error),
+-    });
+-
+-    if (error.name === "AbortError" || abortController?.signal.aborted) {
+-      logger.debug("Stream aborted by user");
+-      return {
+-        content: aiResponse,
+-        finalContent: aiResponse,
+-        toolCalls: [],
+-        shouldContinue: false,
+-        usage: fullUsage,
+-      };
+-    }
+-
+     // Handle context length errors with helpful message
+     if (isContextLengthError(error)) {
+       logger.debug(`Context length exceeded: ${error}`);
+       throw new Error(`Context length exceeded: ${error}`);
+     }
+-
+     throw error;
+   }
+ 
+-  const toolCalls = Array.from(toolCallsMap.values());
++  const aiResponse = streamResult.aiResponse;
++  const fullUsage = streamResult.usage;
++
++  if (streamResult.aborted) {
++    return {
++      content: aiResponse,
++      finalContent: aiResponse,
++      toolCalls: [],
++      shouldContinue: false,
++      usage: fullUsage,
++    };
++  }
+ 
+   // Validate tool calls have complete arguments
+-  let validToolCalls = toolCalls.filter((tc) => {
+-    if (!tc.name) {
+-      logger.error("Incomplete tool call", {
+-        id: tc.id,
+-        name: tc.name,
+-        hasArguments: !!tc.arguments,
+-        argumentsStr: tc.argumentsStr,
+-      });
+-      return false;
+-    }
+-    return true;
+-  });
++  let validToolCalls = streamResult.toolCalls;
+ 
+   // Text tool mode: when no native tool calls were streamed, parse tool
+   // calls from fenced code blocks in the reply
+@@ -437,7 +257,7 @@ export async function processStreamingResponse(
+   }
+ 
+   // Always preserve the content - it should be displayed regardless of tool calls
+-  finalContent = aiResponse;
++  const finalContent = aiResponse;
+ 
+   return {
+     content: aiResponse,
+diff --git a/extensions/cli/src/stream/streamChatResponse.types.ts b/extensions/cli/src/stream/streamChatResponse.types.ts
+index 405505eee..839e394df 100644
+--- a/extensions/cli/src/stream/streamChatResponse.types.ts
++++ b/extensions/cli/src/stream/streamChatResponse.types.ts
+@@ -7,6 +7,9 @@ import { ToolCallPreview } from "../tools/types.js";
+ export interface StreamCallbacks {
+   onContent?: (content: string) => void;
+   onContentComplete?: (content: string) => void;
++  /** Called when a mid-stream retry discards the partial content of the
++   * failed attempt, so the UI can clear the streaming display. */
++  onStreamReset?: () => void;
+   onToolStart?: (toolName: string, toolArgs?: any) => void;
+   onToolResult?: (result: string, toolName: string, status: ToolStatus) => void;
+   onToolError?: (error: string, toolName?: string) => void;
+diff --git a/extensions/cli/src/stream/streamResilience.test.ts b/extensions/cli/src/stream/streamResilience.test.ts
+new file mode 100644
+index 000000000..9d2997eb9
+--- /dev/null
++++ b/extensions/cli/src/stream/streamResilience.test.ts
+@@ -0,0 +1,153 @@
++import { describe, expect, it, vi } from "vitest";
++
++import { consumeStreamWithResilience } from "./streamResilience.js";
++import type { ResilientStreamParams } from "./streamResilience.js";
++
++function makeModel(): any {
++  return { model: "test-model", defaultCompletionOptions: undefined };
++}
++
++function makeParams(
++  llmApi: any,
++  overrides: Partial<ResilientStreamParams> = {},
++): ResilientStreamParams {
++  return {
++    llmApi,
++    model: makeModel(),
++    abortController: new AbortController(),
++    isHeadless: true,
++    tools: undefined,
++    toolMode: "native",
++    baseMessages: [{ role: "user", content: "hi" }] as any,
++    requestStartTime: Date.now(),
++    retryDelayMs: 1,
++    ...overrides,
++  };
++}
++
++async function* streamOf(chunks: any[]): AsyncGenerator<any> {
++  for (const chunk of chunks) {
++    yield chunk;
++  }
++}
++
++function contentChunk(text: string, finishReason?: string): any {
++  return {
++    choices: [
++      { delta: { content: text }, finish_reason: finishReason ?? null },
++    ],
++  };
++}
++
++describe("consumeStreamWithResilience", () => {
++  it("continues a stream interrupted by a 429 without duplicating content", async () => {
++    const calls: any[] = [];
++    const llmApi = {
++      chatCompletionStream: vi.fn((params: any) => {
++        calls.push(params);
++        if (calls.length === 1) {
++          // First attempt: one token, then a mid-stream rate limit
++          return (async function* () {
++            yield contentChunk("Hello ");
++            const error = new Error("HTTP 429 Too Many Requests");
++            (error as any).status = 429;
++            throw error;
++          })() as any;
++        }
++        // Second attempt: the model continues from the partial
++        return streamOf([
++          contentChunk("world"),
++          contentChunk("!", "stop"),
++        ]) as any;
++      }),
++    };
++
++    const result = await consumeStreamWithResilience(makeParams(llmApi));
++
++    expect(result.aborted).toBe(false);
++    expect(result.aiResponse).toBe("Hello world!");
++    expect(result.toolCalls).toHaveLength(0);
++
++    // The retry must use assistant prefill: the partial answer is sent back
++    // so the model continues instead of regenerating (and thinking again)
++    expect(calls.length).toBe(2);
++    const retryMessages = calls[1].messages;
++    const lastMessage = retryMessages[retryMessages.length - 1];
++    expect(lastMessage.role).toBe("assistant");
++    expect(lastMessage.content).toBe("Hello ");
++  });
++
++  it("retries a thinking-only stream with a final-answer nudge", async () => {
++    const calls: any[] = [];
++    const llmApi = {
++      chatCompletionStream: vi.fn((params: any) => {
++        calls.push(params);
++        if (calls.length === 1) {
++          // First attempt: reasoning only, no answer, stream ends cleanly
++          return streamOf([
++            {
++              choices: [
++                {
++                  delta: { reasoning_content: "deep thoughts..." },
++                  finish_reason: null,
++                },
++              ],
++            },
++            { choices: [{ delta: {}, finish_reason: "stop" }] },
++          ]) as any;
++        }
++        return streamOf([contentChunk("Final answer", "stop")]) as any;
++      }),
++    };
++
++    const result = await consumeStreamWithResilience(makeParams(llmApi));
++
++    expect(result.aiResponse).toBe("Final answer");
++    expect(calls.length).toBe(2);
++
++    // Thinking-only retries reset the content and append a nudge so the
++    // model converges to a final answer instead of returning silence
++    const retryMessages = calls[1].messages;
++    const lastMessage = retryMessages[retryMessages.length - 1];
++    expect(lastMessage.role).toBe("user");
++    expect(JSON.stringify(lastMessage.content)).toContain("final answer");
++  });
++
++  it("gives up after the maximum number of mid-stream retries", async () => {
++    const llmApi = {
++      chatCompletionStream: vi.fn(() => {
++        const generator = (async function* () {
++          const error = new Error("HTTP 429 Too Many Requests");
++          (error as any).status = 429;
++          throw error;
++        })();
++        return generator as any;
++      }),
++    };
++
++    await expect(
++      consumeStreamWithResilience(makeParams(llmApi)),
++    ).rejects.toThrow();
++
++    // 1 initial attempt + 3 mid-stream retries
++    expect(llmApi.chatCompletionStream).toHaveBeenCalledTimes(4);
++  });
++
++  it("does not retry connection-phase failures twice", async () => {
++    const llmApi = {
++      chatCompletionStream: vi.fn(() => {
++        // A non-retryable status thrown before the stream starts: retried
++        // neither by the backoff helper nor by the mid-stream loop
++        const error = new Error("HTTP 400 Bad Request");
++        (error as any).status = 400;
++        throw error;
++      }),
++    };
++
++    await expect(
++      consumeStreamWithResilience(makeParams(llmApi)),
++    ).rejects.toThrow("HTTP 400 Bad Request");
++
++    expect(llmApi.chatCompletionStream).toHaveBeenCalledTimes(1);
++  });
++});
+diff --git a/extensions/cli/src/stream/streamResilience.ts b/extensions/cli/src/stream/streamResilience.ts
+new file mode 100644
+index 000000000..fd1495702
+--- /dev/null
++++ b/extensions/cli/src/stream/streamResilience.ts
+@@ -0,0 +1,499 @@
++/**
++ * Mid-stream resilience for the CLI chat stream (modeled on Gemini CLI's
++ * mid-stream retries):
++ *
++ * - per-chunk idle watchdog (a stalled/overloaded server is retried instead
++ *   of hanging forever)
++ * - retryable mid-stream failures (429, 5xx, dropped connections, idle
++ *   timeout) are retried up to 3 times with 1s/2s/4s backoff
++ * - continuation: with a partial answer the retry uses assistant prefill
++ *   (the model continues where it stopped, without regenerating); a
++ *   thinking-only or empty response is retried with an explicit
++ *   "provide your final answer" nudge
++ */
++
++import type { ModelConfig } from "@continuedev/config-yaml";
++import { BaseLlmApi } from "@continuedev/openai-adapters";
++import type {
++  ChatCompletionMessageParam,
++  ChatCompletionTool,
++} from "openai/resources.mjs";
++
++import { ToolMode } from "../permissions/types.js";
++import { telemetryService } from "../telemetry/telemetryService.js";
++import { ToolCall } from "../tools/index.js";
++import {
++  calculateMidStreamDelayMs,
++  chatCompletionStreamWithBackoff,
++  isMidStreamRetryableError,
++} from "../util/exponentialBackoff.js";
++import { logger } from "../util/logger.js";
++
++import {
++  processChunkContent,
++  processToolCallDelta,
++  recordStreamTelemetry,
++  trackFirstTokenTime,
++} from "./streamChatResponse.helpers.js";
++import {
++  getDefaultCompletionOptions,
++  type StreamCallbacks,
++} from "./streamChatResponse.types.js";
++
++interface ProcessChunkOptions {
++  chunk: any;
++  aiResponse: string;
++  toolCallsMap: Map<string, ToolCall>;
++  indexToIdMap: Map<number, string>;
++  callbacks?: StreamCallbacks;
++  isHeadless?: boolean;
++}
++
++/** Processes one streaming chunk: content accumulation + native tool deltas. */
++function processChunk(options: ProcessChunkOptions): {
++  aiResponse: string;
++  shouldContinue: boolean;
++} {
++  const {
++    chunk,
++    aiResponse,
++    toolCallsMap,
++    indexToIdMap,
++    callbacks,
++    isHeadless,
++  } = options;
++  // Safety check: ensure chunk has the expected structure
++  if (!chunk.choices || !chunk.choices[0]) {
++    return { aiResponse, shouldContinue: true };
++  }
++
++  const choice = chunk.choices[0];
++  if (!choice.delta) {
++    return { aiResponse, shouldContinue: true };
++  }
++
++  let updatedResponse = aiResponse;
++
++  // Handle content streaming
++  if (choice.delta.content) {
++    updatedResponse = processChunkContent(
++      choice.delta.content,
++      aiResponse,
++      callbacks,
++      isHeadless,
++    );
++  }
++
++  // Handle tool calls
++  if (choice.delta.tool_calls) {
++    for (const toolCallDelta of choice.delta.tool_calls) {
++      processToolCallDelta(toolCallDelta, toolCallsMap, indexToIdMap);
++    }
++  }
++
++  return { aiResponse: updatedResponse, shouldContinue: true };
++}
++
++const MAX_MID_STREAM_RETRIES = 3;
++
++/**
++ * A stream that completed without any answer content (reasoning only, or
++ * nothing at all). Retried with a nudge instead of returning silence.
++ */
++export class EmptyStreamError extends Error {
++  constructor(
++    message: string,
++    public readonly thinkingOnly: boolean,
++  ) {
++    super(message);
++    this.name = "EmptyStreamError";
++  }
++}
++
++export interface ResilientStreamParams {
++  llmApi: BaseLlmApi;
++  model: ModelConfig;
++  abortController: AbortController;
++  callbacks?: StreamCallbacks;
++  isHeadless?: boolean;
++  tools?: ChatCompletionTool[];
++  toolMode: ToolMode;
++  baseMessages: ChatCompletionMessageParam[];
++  requestStartTime: number;
++  /** Override for tests (defaults to the 1s/2s/4s exponential backoff). */
++  retryDelayMs?: number;
++}
++
++export interface ResilientStreamResult {
++  aiResponse: string;
++  toolCalls: ToolCall[];
++  usage: any;
++  /** True when the user aborted: the caller returns the partial content. */
++  aborted: boolean;
++}
++
++/**
++ * Builds the request messages for one attempt. On retries:
++ * - partial answer exists -> assistant prefill (model continues where it
++ *   stopped, without regenerating)
++ * - thinking-only or empty -> explicit nudge (partial reasoning cannot be
++ *   replayed to OpenAI-compatible APIs anyway)
++ */
++export function buildAttemptMessages(
++  baseMessages: ChatCompletionMessageParam[],
++  attempt: number,
++  aiResponse: string,
++  sawThinking: boolean,
++): { messages: ChatCompletionMessageParam[]; resetDisplay: boolean } {
++  if (attempt === 0) {
++    return { messages: baseMessages, resetDisplay: false };
++  }
++
++  const thinkingOnly = sawThinking && !aiResponse.trim();
++  const nudge = thinkingOnly
++    ? "[System] The previous response was interrupted while reasoning and contained no final answer. Provide your final answer now, concisely."
++    : "[System] The previous response was interrupted mid-answer. Continue exactly where it stopped, without repeating what was already written.";
++
++  let messages: ChatCompletionMessageParam[];
++  if (aiResponse.trim() && attempt === 1) {
++    messages = [
++      ...baseMessages,
++      { role: "assistant", content: aiResponse } as ChatCompletionMessageParam,
++    ];
++  } else if (aiResponse.trim()) {
++    messages = [
++      ...baseMessages,
++      { role: "assistant", content: aiResponse } as ChatCompletionMessageParam,
++      { role: "user", content: nudge } as ChatCompletionMessageParam,
++    ];
++  } else {
++    messages = [
++      ...baseMessages,
++      { role: "user", content: nudge } as ChatCompletionMessageParam,
++    ];
++  }
++
++  // A thinking-only/empty attempt produced nothing displayable: tell the UI
++  // to clear the streaming area before the retry (the partial display of a
++  // prefill continuation stays valid).
++  return { messages, resetDisplay: !aiResponse.trim() };
++}
++
++function createWatchdogNext(
++  iterator: AsyncGenerator<any>,
++  idleTimeoutMs: number,
++): () => Promise<IteratorResult<any>> {
++  if (idleTimeoutMs <= 0) {
++    return () => iterator.next();
++  }
++  return () => {
++    let idleTimer: ReturnType<typeof setTimeout> | undefined;
++    return Promise.race([
++      iterator.next(),
++      new Promise<never>((_, reject) => {
++        idleTimer = setTimeout(
++          () =>
++            reject(
++              new Error(
++                `Stream idle: no data received from the model for ${idleTimeoutMs}ms`,
++              ),
++            ),
++          idleTimeoutMs,
++        );
++      }),
++    ]).finally(() => clearTimeout(idleTimer));
++  };
++}
++
++interface AttemptState {
++  aiResponse: string;
++  sawThinking: boolean;
++  inputTokens: number;
++  outputTokens: number;
++  fullUsage: any;
++  firstTokenTime: number | null;
++  aborted: boolean;
++}
++
++async function readAttemptChunks(
++  iterator: AsyncGenerator<any>,
++  state: AttemptState,
++  context: {
++    model: ModelConfig;
++    abortController: AbortController;
++    callbacks?: StreamCallbacks;
++    isHeadless?: boolean;
++    tools?: ChatCompletionTool[];
++    requestStartTime: number;
++  },
++  toolCallsMap: Map<string, ToolCall>,
++  indexToIdMap: Map<number, string>,
++): Promise<void> {
++  const nextWithWatchdog = createWatchdogNext(iterator, idleTimeoutMs());
++
++  let chunkCount = 0;
++  let chunkNext = await nextWithWatchdog();
++  while (!chunkNext.done) {
++    if (context.abortController?.signal.aborted) {
++      logger.debug("Stream aborted");
++      state.aborted = true;
++      break;
++    }
++    const chunk = chunkNext.value;
++    chunkCount++;
++
++    logger.debug("Received chunk", { chunkCount, chunk });
++
++    // Track reasoning-only streams (drives the thinking-only retry nudge)
++    if ((chunk as any)?.choices?.[0]?.delta?.reasoning_content) {
++      state.sawThinking = true;
++    }
++
++    // Track token usage if available
++    if (chunk.usage) {
++      state.inputTokens = chunk.usage.prompt_tokens || 0;
++      state.outputTokens = chunk.usage.completion_tokens || 0;
++      state.fullUsage = chunk.usage; // Capture full usage incl. cache details
++    }
++
++    // Track first token time
++    state.firstTokenTime = trackFirstTokenTime(
++      state.firstTokenTime,
++      chunk,
++      context.requestStartTime,
++      context.model,
++      context.tools,
++    );
++
++    const result = processChunk({
++      chunk,
++      aiResponse: state.aiResponse,
++      toolCallsMap,
++      indexToIdMap,
++      callbacks: context.callbacks,
++      isHeadless: context.isHeadless,
++    });
++    state.aiResponse = result.aiResponse;
++    if (!result.shouldContinue) break;
++
++    chunkNext = await nextWithWatchdog();
++  }
++}
++
++function idleTimeoutMs(): number {
++  return Number(process.env.CONTINUE_CLI_IDLE_TIMEOUT_MS ?? 120_000);
++}
++
++function shouldRetryMidStream(
++  error: any,
++  connectionPhase: boolean,
++  attempt: number,
++): boolean {
++  const retryable =
++    error instanceof EmptyStreamError || isMidStreamRetryableError(error);
++
++  // Pre-stream (connection phase) errors were already retried by
++  // chatCompletionStreamWithBackoff - never replay them here.
++  return retryable && !connectionPhase && attempt < MAX_MID_STREAM_RETRIES;
++}
++
++function finalizeStreamSuccess(
++  state: AttemptState,
++  toolCallsMap: Map<string, ToolCall>,
++  context: {
++    model: ModelConfig;
++    requestStartTime: number;
++    tools?: ChatCompletionTool[];
++  },
++): ResilientStreamResult {
++  const responseEndTime = Date.now();
++  const cost = recordStreamTelemetry({
++    requestStartTime: context.requestStartTime,
++    responseEndTime,
++    inputTokens: state.inputTokens,
++    outputTokens: state.outputTokens,
++    model: context.model,
++    tools: context.tools,
++    fullUsage: state.fullUsage,
++  });
++  const totalDuration = responseEndTime - context.requestStartTime;
++
++  // Enhance fullUsage with model and cost for saving to session
++  if (state.fullUsage) {
++    state.fullUsage.model = context.model.model;
++    state.fullUsage.cost_cents = Math.round(cost * 100); // Convert dollars to cents
++  }
++
++  logger.debug("Stream complete", {
++    responseLength: state.aiResponse.length,
++    toolCallsCount: toolCallsMap.size,
++    inputTokens: state.inputTokens,
++    outputTokens: state.outputTokens,
++    cacheReadTokens: state.fullUsage?.prompt_tokens_details?.cache_read_tokens,
++    cacheWriteTokens:
++      state.fullUsage?.prompt_tokens_details?.cache_write_tokens,
++    cost,
++    duration: totalDuration,
++  });
++
++  const validToolCalls = Array.from(toolCallsMap.values()).filter(
++    (tc) => !!tc.name,
++  );
++  if (validToolCalls.length !== toolCallsMap.size) {
++    logger.error("Dropping incomplete tool call(s) from stream", {
++      total: toolCallsMap.size,
++      valid: validToolCalls.length,
++    });
++  }
++
++  return {
++    aiResponse: state.aiResponse,
++    toolCalls: validToolCalls,
++    usage: state.fullUsage,
++    aborted: false,
++  };
++}
++
++export async function consumeStreamWithResilience(
++  params: ResilientStreamParams,
++): Promise<ResilientStreamResult> {
++  const {
++    llmApi,
++    model,
++    abortController,
++    callbacks,
++    isHeadless,
++    tools,
++    toolMode,
++    baseMessages,
++    requestStartTime,
++  } = params;
++
++  const toolCallsMap = new Map<string, ToolCall>();
++  const indexToIdMap = new Map<number, string>();
++
++  // Accumulated state persists ACROSS attempts: the partial answer must
++  // survive a thrown stream so the retry can prefill-continue from it.
++  const state: AttemptState = {
++    aiResponse: "",
++    sawThinking: false,
++    inputTokens: 0,
++    outputTokens: 0,
++    fullUsage: null,
++    firstTokenTime: null,
++    aborted: false,
++  };
++
++  let attempt = 0;
++
++  while (true) {
++    let connectionPhase = false;
++    try {
++      const { messages: attemptMessages, resetDisplay } = buildAttemptMessages(
++        baseMessages,
++        attempt,
++        state.aiResponse,
++        state.sawThinking,
++      );
++      if (resetDisplay) {
++        callbacks?.onStreamReset?.();
++      }
++      state.sawThinking = false;
++
++      connectionPhase = true;
++      const stream = await chatCompletionStreamWithBackoff(
++        llmApi,
++        {
++          model: model.model,
++          messages: attemptMessages,
++          stream: true,
++          // In text tool mode the tools are described in the system message and
++          // parsed from the reply - the native tools parameter must stay empty
++          // so that strict OpenAI-compatible servers never see it.
++          tools: toolMode === "text" ? undefined : tools,
++          ...getDefaultCompletionOptions(model.defaultCompletionOptions),
++        },
++        abortController.signal,
++      );
++      connectionPhase = false;
++
++      await readAttemptChunks(
++        stream[Symbol.asyncIterator](),
++        state,
++        {
++          model,
++          abortController,
++          callbacks,
++          isHeadless,
++          tools,
++          requestStartTime,
++        },
++        toolCallsMap,
++        indexToIdMap,
++      );
++
++      // Invalid-stream detection (Gemini CLI pattern): a stream that ended
++      // with reasoning only - or nothing at all - is retried with a nudge;
++      // once the retry budget is exhausted the error surfaces instead of
++      // returning silence to the user.
++      const noAnswer = !state.aiResponse.trim() && toolCallsMap.size === 0;
++      if (noAnswer && !state.aborted) {
++        throw new EmptyStreamError(
++          state.sawThinking
++            ? "Stream ended with reasoning only and no final answer"
++            : "Stream ended with an empty response",
++          state.sawThinking,
++        );
++      }
++
++      return finalizeStreamSuccess(state, toolCallsMap, {
++        model,
++        requestStartTime,
++        tools,
++      });
++    } catch (error: any) {
++      const errorDuration = Date.now() - requestStartTime;
++
++      // Log failed API request
++      telemetryService.logApiRequest({
++        model: model.model,
++        durationMs: errorDuration,
++        success: false,
++        error: error.message || String(error),
++      });
++
++      if (error.name === "AbortError" || abortController?.signal.aborted) {
++        logger.debug("Stream aborted by user");
++        state.aborted = true;
++        return {
++          aiResponse: state.aiResponse,
++          toolCalls: [],
++          usage: state.fullUsage,
++          aborted: true,
++        };
++      }
++
++      if (!shouldRetryMidStream(error, connectionPhase, attempt)) {
++        throw error;
++      }
++
++      attempt++;
++      const delayMs =
++        params.retryDelayMs ?? calculateMidStreamDelayMs(attempt - 1);
++      logger.info(
++        `Stream interrupted (${error.message}) - retrying attempt ${attempt}/${MAX_MID_STREAM_RETRIES} in ${delayMs}ms`,
++      );
++      callbacks?.onSystemMessage?.(
++        `⟳ ${error.message} - retrying (attempt ${attempt}/${MAX_MID_STREAM_RETRIES})…`,
++      );
++
++      // Per-attempt state: partial native tool calls are discarded (incomplete
++      // arguments); accumulated content is kept for prefill continuation.
++      toolCallsMap.clear();
++      indexToIdMap.clear();
++      state.firstTokenTime = null;
++
++      await new Promise((resolve) => setTimeout(resolve, delayMs));
++    }
++  }
++}
+diff --git a/extensions/cli/src/ui/TUIChat.tsx b/extensions/cli/src/ui/TUIChat.tsx
+index 6eaca42cc..282e58c73 100644
+--- a/extensions/cli/src/ui/TUIChat.tsx
++++ b/extensions/cli/src/ui/TUIChat.tsx
+@@ -32,6 +32,7 @@ import { useChat } from "./hooks/useChat.js";
+ import { useContextPercentage } from "./hooks/useContextPercentage.js";
+ import { useMessageRenderer } from "./hooks/useMessageRenderer.js";
+ import { useIntroMessage, useSelectors } from "./hooks/useTUIChatHooks.js";
++import { MarkdownRenderer } from "./MarkdownRenderer.js";
+ 
+ interface TUIChatProps {
+   // Remote mode props
+@@ -213,6 +214,7 @@ const TUIChat: React.FC<TUIChatProps> = ({
+   const {
+     chatHistory,
+     setChatHistory,
++    streamingContent,
+     isWaitingForResponse,
+     responseStartTime,
+     isCompacting,
+@@ -415,6 +417,16 @@ const TUIChat: React.FC<TUIChatProps> = ({
+           renderMessage={renderMessage}
+           refreshTrigger={staticRefreshTrigger}
+         />
++
++        {/* Live streaming display - in-progress assistant content, flushed
++            in batches by createStreamCallbacks */}
++        {streamingContent !== null && streamingContent !== "" && (
++          <Box marginBottom={1} paddingLeft={0}>
++            <Text color="white">●</Text>
++            <Text> </Text>
++            <MarkdownRenderer content={streamingContent} />
++          </Box>
++        )}
+       </Box>
+ 
+       {/* Fixed bottom section */}
+diff --git a/extensions/cli/src/ui/hooks/useChat.stream.helpers.ts b/extensions/cli/src/ui/hooks/useChat.stream.helpers.ts
+index a11550ccf..0767e226c 100644
+--- a/extensions/cli/src/ui/hooks/useChat.stream.helpers.ts
++++ b/extensions/cli/src/ui/hooks/useChat.stream.helpers.ts
+@@ -11,6 +11,7 @@ import { generateSessionTitle } from "./useChat.helpers.js";
+ interface CreateStreamCallbacksOptions {
+   setChatHistory: React.Dispatch<React.SetStateAction<ChatHistoryItem[]>>;
+   setActivePermissionRequest: React.Dispatch<React.SetStateAction<any>>;
++  setStreamingContent?: React.Dispatch<React.SetStateAction<string | null>>;
+   llmApi?: any;
+   model?: any;
+ }
+@@ -21,12 +22,42 @@ interface CreateStreamCallbacksOptions {
+ export function createStreamCallbacks(
+   options: CreateStreamCallbacksOptions,
+ ): any {
+-  const { setChatHistory, setActivePermissionRequest, llmApi, model } = options;
++  const {
++    setChatHistory,
++    setActivePermissionRequest,
++    setStreamingContent,
++    llmApi,
++    model,
++  } = options;
++
++  // Live streaming: deltas are buffered and flushed at most every
++  // STREAMING_FLUSH_INTERVAL_MS so the Ink UI re-renders a handful of times
++  // per second instead of on every token.
++  const STREAMING_FLUSH_INTERVAL_MS = 120;
++  let streamingBuffer = "";
++  let lastStreamingFlush = 0;
+ 
+   return {
+-    onContent: (_: string) => {},
++    onContent: (delta: string) => {
++      if (!setStreamingContent) return;
++      streamingBuffer += delta;
++      if (Date.now() - lastStreamingFlush >= STREAMING_FLUSH_INTERVAL_MS) {
++        lastStreamingFlush = Date.now();
++        setStreamingContent(streamingBuffer);
++      }
++    },
++
++    onStreamReset: () => {
++      // A mid-stream retry discarded the partial content of the failed
++      // attempt: clear the streaming display before the new attempt.
++      streamingBuffer = "";
++      setStreamingContent?.("");
++    },
+ 
+     onContentComplete: async (content: string) => {
++      // The final assistant message lands in the chat history: the live
++      // streaming display is no longer needed.
++      setStreamingContent?.(null);
+       // Do not add assistant messages via service; handleToolCalls is the single writer
+       // For environments where the service isn't ready (unit tests), update local state only
+       try {
+diff --git a/extensions/cli/src/ui/hooks/useChat.ts b/extensions/cli/src/ui/hooks/useChat.ts
+index 4bd2bc5c5..6fbe25fad 100644
+--- a/extensions/cli/src/ui/hooks/useChat.ts
++++ b/extensions/cli/src/ui/hooks/useChat.ts
+@@ -168,6 +168,10 @@ export function useChat({
+   // Capture initial rules to prevent re-initialization when rules change
+   const [initialRules] = useState(additionalRules);
+   const [attachedFiles, setAttachedFiles] = useState<AttachedFile[]>([]);
++  // Live streaming display: the in-progress assistant content, flushed in
++  // batches (throttled in createStreamCallbacks) so the Ink UI re-renders
++  // ~8-10x per second instead of on every token.
++  const [streamingContent, setStreamingContent] = useState<string | null>(null);
+   const [activePermissionRequest, setActivePermissionRequest] =
+     useState<ActivePermissionRequest | null>(null);
+   const [activeQuizQuestion, setActiveQuizQuestion] =
+@@ -314,6 +318,7 @@ export function useChat({
+       const streamCallbacks = createStreamCallbacks({
+         setChatHistory: setChatHistory,
+         setActivePermissionRequest,
++        setStreamingContent,
+         llmApi,
+         model,
+       });
+@@ -866,6 +871,7 @@ export function useChat({
+     compactionStartTime,
+     inputMode,
+     attachedFiles,
++    streamingContent,
+     activePermissionRequest,
+     activeQuizQuestion,
+     wasInterrupted,
+diff --git a/extensions/cli/src/util/exponentialBackoff.ts b/extensions/cli/src/util/exponentialBackoff.ts
+index 8f3004ae9..290c73a5d 100644
+--- a/extensions/cli/src/util/exponentialBackoff.ts
++++ b/extensions/cli/src/util/exponentialBackoff.ts
+@@ -52,6 +52,31 @@ function isRetryableHttpStatus(status: number): boolean {
+   return status === 429 || status === 502 || status === 503 || status === 504;
+ }
+ 
++/**
++ * Whether an error raised DURING stream consumption is worth a mid-stream
++ * retry: the standard retryable errors plus stalled/dropped streams.
++ */
++export function isMidStreamRetryableError(error: any): boolean {
++  if (isRetryableError(error)) {
++    return true;
++  }
++  const message = (error?.message ?? "").toLowerCase();
++  return (
++    message.includes("stream idle") ||
++    message.includes("premature close") ||
++    message.includes("socket hang up") ||
++    message.includes("econnreset")
++  );
++}
++
++/**
++ * Delay before a mid-stream retry attempt (1s, 2s, 4s — same shape as the
++ * GUI retry policy and Gemini CLI's mid-stream retries).
++ */
++export function calculateMidStreamDelayMs(attempt: number): number {
++  return Math.min(1000 * Math.pow(2, Math.max(0, attempt)), 8000);
++}
++
+ /**
+  * Checks if the error type indicates a server issue
+  */
+-- 
+2.53.0
+
+
+From b1c7306d0552c9a1d0631041b5cd51d075c00ec6 Mon Sep 17 00:00:00 2001
+From: sam <sam@local>
+Date: Tue, 17 Nov 2026 23:07:11 +0100
+Subject: [PATCH 3/4] perf(cli): hybrid token estimation, telemetry strictly
+ opt-in
+
+- token counting for large texts (>20k chars) switches from exact
+  gpt-tokenizer encoding (pure JS, blocks the Ink UI for seconds on big
+  histories) to a conservative chars-based estimate (~3.4 chars/token,
+  erring on the safe side for pruning) - same direction as Gemini CLI's
+  estimateTokenCountSync; small texts keep exact counting
+- telemetry defaults to OFF: metrics are exported only when the user
+  explicitly sets CONTINUE_CLI_ENABLE_TELEMETRY=1 (or
+  CONTINUE_METRICS_ENABLED=1) AND an OTel endpoint is configured
+---
+ .../cli/src/telemetry/telemetryService.ts     | 14 +++++++-----
+ extensions/cli/src/util/tokenizer.ts          | 22 +++++++++++++++----
+ 2 files changed, 26 insertions(+), 10 deletions(-)
+
+diff --git a/extensions/cli/src/telemetry/telemetryService.ts b/extensions/cli/src/telemetry/telemetryService.ts
+index 5804a24bc..cf5296078 100644
+--- a/extensions/cli/src/telemetry/telemetryService.ts
++++ b/extensions/cli/src/telemetry/telemetryService.ts
+@@ -72,13 +72,15 @@ class TelemetryService {
+       process.env.OTEL_METRICS_EXPORTER
+     );
+ 
+-    let telemetryEnabled = true;
+-    if (process.env.CONTINUE_METRICS_ENABLED === "0") {
+-      telemetryEnabled = false;
+-    } else if (process.env.CONTINUE_METRICS_ENABLED === "1") {
++    let telemetryEnabled = false;
++    // Opt-in only: metrics are exported exclusively when the user explicitly
++    // enables them AND provides an OTel endpoint. Nothing phones home by
++    // default (consistent with the final open-source release of Continue).
++    if (
++      process.env.CONTINUE_CLI_ENABLE_TELEMETRY === "1" ||
++      process.env.CONTINUE_METRICS_ENABLED === "1"
++    ) {
+       telemetryEnabled = true;
+-    } else {
+-      telemetryEnabled = process.env.CONTINUE_CLI_ENABLE_TELEMETRY !== "0";
+     }
+ 
+     const enabled = telemetryEnabled && hasOtelConfig;
+diff --git a/extensions/cli/src/util/tokenizer.ts b/extensions/cli/src/util/tokenizer.ts
+index c1c4d6fa0..32e8cc9dd 100644
+--- a/extensions/cli/src/util/tokenizer.ts
++++ b/extensions/cli/src/util/tokenizer.ts
+@@ -41,7 +41,7 @@ function countContentTokens(
+   model: ModelConfig,
+ ): number {
+   if (typeof content === "string") {
+-    const count = encode(content).length;
++    const count = countTextTokens(content);
+     return getAdjustedTokenCountFromModel(count, model.model ?? "");
+   }
+ 
+@@ -49,7 +49,7 @@ function countContentTokens(
+     let tokenCount = 0;
+     for (const part of content) {
+       if (part.type === "text" && part.text) {
+-        tokenCount += encode(part.text).length;
++        tokenCount += countTextTokens(part.text);
+       }
+       if (part.type === "imageUrl") {
+         tokenCount += 1024; // Rough estimate for image tokens
+@@ -61,6 +61,20 @@ function countContentTokens(
+   return 0;
+ }
+ 
++// Above this size, exact tokenization with gpt-tokenizer (pure JS) blocks the
++// CLI's main thread long enough to freeze the Ink UI on every request with a
++// large history (the same class of problem Gemini CLI fixed with
++// estimateTokenCountSync). The heuristic slightly over-estimates (~3.4
++// chars/token) so context validation and pruning err on the safe side.
++const EXACT_TOKENIZATION_MAX_CHARS = 20_000;
++
++function countTextTokens(text: string): number {
++  if (text.length <= EXACT_TOKENIZATION_MAX_CHARS) {
++    return encode(text).length;
++  }
++  return Math.ceil(text.length / 3.4);
++}
++
+ /**
+  * Count tokens in a single tool call function
+  */
+@@ -90,7 +104,7 @@ function countToolOutputTokens(
+   let tokenCount = 0;
+   for (const item of output) {
+     if (item.content) {
+-      tokenCount += encode(item.content).length;
++      tokenCount += countTextTokens(item.content);
+     }
+     // Note: item.name is not sent to the model, only used for internal tracking
+     tokenCount += 5; // Output structure overhead
+@@ -137,7 +151,7 @@ export function countChatHistoryItemTokens(
+ 
+     // Add tokens for context items
+     for (const contextItem of historyItem.contextItems) {
+-      tokenCount += encode(contextItem.content).length;
++      tokenCount += countTextTokens(contextItem.content);
+       tokenCount += encode(contextItem.name).length;
+       tokenCount += 5; // Context item structure overhead
+     }
+-- 
+2.53.0
+
+
+From 78b4790b135007a4491da00c85e86c925f23375f Mon Sep 17 00:00:00 2001
+From: sam <sam@local>
+Date: Tue, 17 Nov 2026 23:23:47 +0100
+Subject: [PATCH 4/4] perf(gui): memoize assistant messages, tune stream
+ batching to ~120ms
+
+- StepContainer (the assistant message renderer, with the expensive
+  StyledMarkdownPreview) is now memoized: during streaming only the
+  message actually being streamed re-renders, since unchanged history
+  items keep their identity in the redux store - previously the whole
+  visible history re-rendered on every stream batch, growing jank with
+  session size (the webview equivalent of Gemini CLI's static/dynamic
+  split and the CLI's batched flush)
+- the webview stream poll goes from 50ms to 120ms: half the re-renders,
+  the stream stays visually live
+---
+ gui/src/components/StepContainer/StepContainer.tsx | 13 +++++++++++--
+ gui/src/context/IdeMessenger.tsx                   |  5 ++++-
+ 2 files changed, 15 insertions(+), 3 deletions(-)
+
+diff --git a/gui/src/components/StepContainer/StepContainer.tsx b/gui/src/components/StepContainer/StepContainer.tsx
+index fc6981d05..fa90869e3 100644
+--- a/gui/src/components/StepContainer/StepContainer.tsx
++++ b/gui/src/components/StepContainer/StepContainer.tsx
+@@ -1,6 +1,6 @@
+ import { ChatHistoryItem } from "core";
+ import { renderChatMessage, stripImages } from "core/util/messageContent";
+-import { useEffect, useState } from "react";
++import { memo, useEffect, useState } from "react";
+ import { useDispatch } from "react-redux";
+ import { useAppSelector } from "../../redux/hooks";
+ import { selectUIConfig } from "../../redux/slices/configSlice";
+@@ -18,7 +18,7 @@ interface StepContainerProps {
+   latestSummaryIndex?: number;
+ }
+ 
+-export default function StepContainer(props: StepContainerProps) {
++function StepContainer(props: StepContainerProps) {
+   const dispatch = useDispatch();
+   const [isTruncated, setIsTruncated] = useState(false);
+   const isStreaming = useAppSelector((state) => state.session.isStreaming);
+@@ -137,3 +137,12 @@ export default function StepContainer(props: StepContainerProps) {
+     </div>
+   );
+ }
++
++/**
++ * Memoized so that during streaming only the message actually being
++ * streamed re-renders: unchanged history items keep their identity in the
++ * redux store, so their props stay equal and the (expensive) markdown
++ * preview is skipped. Without this, the whole visible history re-renders
++ * on every stream batch (~8-20 per second).
++ */
++export default memo(StepContainer);
+diff --git a/gui/src/context/IdeMessenger.tsx b/gui/src/context/IdeMessenger.tsx
+index ab028a139..2c16f289e 100644
+--- a/gui/src/context/IdeMessenger.tsx
++++ b/gui/src/context/IdeMessenger.tsx
+@@ -227,7 +227,10 @@ export class IdeMessenger implements IIdeMessenger {
+           index = buffer.length;
+           yield chunks;
+         }
+-        await new Promise((resolve) => setTimeout(resolve, 50));
++        // Batch the webview -> UI updates: dispatching per token would
++        // re-render the chat 60x/second; a ~120ms cadence matches the CLI's
++        // streaming flush and keeps the stream visually live.
++        await new Promise((resolve) => setTimeout(resolve, 120));
+       }
+ 
+       if (buffer.length > index) {
+-- 
+2.53.0
+

@@ -1,0 +1,3364 @@
+From 774a95167c5f8776909f53dbcfc851ac7cd4225a Mon Sep 17 00:00:00 2001
+From: Copilot <223556219+Copilot@users.noreply.github.com>
+Date: Sun, 22 Nov 2026 20:05:28 +0100
+Subject: [PATCH] feat(agent): improve tools, loops and text streaming
+
+Co-authored-by: Copilot <223556219+Copilot@users.noreply.github.com>
+---
+ core/config/sharedConfig.ts                   |   4 +
+ core/config/types.ts                          |   5 +
+ core/index.d.ts                               |  11 +
+ core/llm/defaultSystemMessages.ts             |  11 +
+ core/protocol/ide.ts                          |   8 +
+ core/protocol/messenger/messageIde.ts         |   8 +
+ core/tools/builtIn.ts                         |  11 +
+ core/tools/callTool.ts                        |  33 ++
+ core/tools/definitions/askQuestion.ts         |  46 +++
+ core/tools/definitions/dotnetTools.ts         |  99 ++++++
+ core/tools/definitions/getDocumentSymbols.ts  |  37 ++
+ core/tools/definitions/getProblems.ts         |  36 ++
+ core/tools/definitions/gitTools.ts            |  73 ++++
+ core/tools/definitions/index.ts               |  15 +
+ core/tools/definitions/readManyFiles.ts       |  37 ++
+ core/tools/implementations/askQuestion.ts     |  38 +++
+ core/tools/implementations/dotnetTools.ts     | 134 ++++++++
+ .../implementations/getDocumentSymbols.ts     |  43 +++
+ core/tools/implementations/getProblems.ts     |  41 +++
+ core/tools/implementations/gitTools.ts        |  63 ++++
+ core/tools/implementations/readManyFiles.ts   |  42 +++
+ core/tools/index.ts                           |  12 +
+ .../toolCodeblocks/index.ts                   |  25 +-
+ core/tools/toolCallSanitization.ts            |  17 +
+ extensions/cli/src/commands/commands.ts       |   5 +
+ extensions/cli/src/services/MCPService.ts     |  11 +-
+ extensions/cli/src/slashCommands.ts           |  11 +
+ .../cli/src/stream/streamChatResponse.ts      |  99 +++++-
+ extensions/cli/src/systemMessage.ts           |   3 +
+ extensions/cli/src/tools/allBuiltIns.ts       |  20 ++
+ extensions/cli/src/tools/dotnetTools.ts       | 323 ++++++++++++++++++
+ extensions/cli/src/tools/edit.ts              |  12 +-
+ extensions/cli/src/tools/gitTools.ts          |  98 ++++++
+ extensions/cli/src/tools/globFiles.ts         |  73 ++++
+ extensions/cli/src/tools/index.tsx            |  22 ++
+ extensions/cli/src/tools/multiEdit.ts         |  13 +-
+ extensions/cli/src/tools/readFile.ts          |  42 +++
+ extensions/cli/src/tools/readFileRange.ts     | 137 ++++++++
+ extensions/cli/src/tools/readManyFiles.ts     |  69 ++++
+ extensions/cli/src/tools/searchCode.ts        |  47 ++-
+ extensions/cli/src/tools/textToolMode.test.ts |  25 ++
+ extensions/cli/src/tools/textToolMode.ts      |  99 ++++--
+ extensions/cli/src/ui/DirectorySearchUI.tsx   |  55 +++
+ extensions/cli/src/ui/SlashCommandUI.tsx      |   5 +
+ extensions/cli/src/ui/TUIChat.tsx             |   3 +-
+ extensions/cli/src/ui/UserInput.tsx           |  85 +++++
+ .../cli/src/ui/hooks/useChat.helpers.ts       |  25 ++
+ .../src/ui/hooks/useChat.stream.helpers.ts    |   2 +-
+ .../cli/src/ui/utils/historySplitting.test.ts |  10 +
+ .../cli/src/ui/utils/historySplitting.ts      |   5 +-
+ .../cli/src/ui/utils/messageSplitting.ts      |   7 +-
+ extensions/cli/src/util/workspace.ts          | 121 +++++++
+ extensions/vscode/scripts/package.js          |   5 +-
+ extensions/vscode/src/VsCodeIde.ts            |  16 +
+ .../vscode/src/extension/VsCodeMessenger.ts   |   3 +
+ gui/src/redux/thunks/callToolById.ts          |  47 ++-
+ gui/src/redux/thunks/streamNormalInput.ts     |  42 ++-
+ 57 files changed, 2334 insertions(+), 55 deletions(-)
+ create mode 100644 core/tools/definitions/askQuestion.ts
+ create mode 100644 core/tools/definitions/dotnetTools.ts
+ create mode 100644 core/tools/definitions/getDocumentSymbols.ts
+ create mode 100644 core/tools/definitions/getProblems.ts
+ create mode 100644 core/tools/definitions/gitTools.ts
+ create mode 100644 core/tools/definitions/readManyFiles.ts
+ create mode 100644 core/tools/implementations/askQuestion.ts
+ create mode 100644 core/tools/implementations/dotnetTools.ts
+ create mode 100644 core/tools/implementations/getDocumentSymbols.ts
+ create mode 100644 core/tools/implementations/getProblems.ts
+ create mode 100644 core/tools/implementations/gitTools.ts
+ create mode 100644 core/tools/implementations/readManyFiles.ts
+ create mode 100644 extensions/cli/src/tools/dotnetTools.ts
+ create mode 100644 extensions/cli/src/tools/gitTools.ts
+ create mode 100644 extensions/cli/src/tools/globFiles.ts
+ create mode 100644 extensions/cli/src/tools/readFileRange.ts
+ create mode 100644 extensions/cli/src/tools/readManyFiles.ts
+ create mode 100644 extensions/cli/src/ui/DirectorySearchUI.tsx
+ create mode 100644 extensions/cli/src/util/workspace.ts
+
+diff --git a/core/config/sharedConfig.ts b/core/config/sharedConfig.ts
+index 65f4d0d2e..4de1b1697 100644
+--- a/core/config/sharedConfig.ts
++++ b/core/config/sharedConfig.ts
+@@ -24,6 +24,7 @@ export const sharedConfigSchema = z
+     codebaseToolCallingOnly: z.boolean(),
+     enableStaticContextualization: z.boolean(),
+     streamIdleTimeoutMs: z.number(),
++    maxAgentTurns: z.number(),
+ 
+     // `ui` in `ContinueConfig`
+     showSessionTabs: z.boolean(),
+@@ -201,6 +202,9 @@ export function modifyAnyConfigWithSharedConfig<
+     configCopy.experimental.streamIdleTimeoutMs =
+       sharedConfig.streamIdleTimeoutMs;
+   }
++  if (sharedConfig.maxAgentTurns !== undefined) {
++    configCopy.experimental.maxAgentTurns = sharedConfig.maxAgentTurns;
++  }
+ 
+   return configCopy;
+ }
+diff --git a/core/config/types.ts b/core/config/types.ts
+index 2500042e8..90c810863 100644
+--- a/core/config/types.ts
++++ b/core/config/types.ts
+@@ -730,6 +730,11 @@ declare global {
+     subprocess(command: string, cwd?: string): Promise<[string, string]>;
+   
+     getProblems(filepath?: string | undefined): Promise<Problem[]>;
++    askQuestion?(args: {
++      question: string;
++      options?: string[];
++      defaultAnswer?: string;
++    }): Promise<string | undefined>;
+   
+     getBranch(dir: string): Promise<string>;
+   
+diff --git a/core/index.d.ts b/core/index.d.ts
+index 96007aef6..34ae7d706 100644
+--- a/core/index.d.ts
++++ b/core/index.d.ts
+@@ -901,6 +901,12 @@ export interface IDE {
+ 
+   getProblems(fileUri?: string | undefined): Promise<Problem[]>;
+ 
++  askQuestion?(args: {
++    question: string;
++    options?: string[];
++    defaultAnswer?: string;
++  }): Promise<string | undefined>;
++
+   getBranch(dir: string): Promise<string>;
+ 
+   getTags(artifactId: string): Promise<IndexTag[]>;
+@@ -1706,6 +1712,11 @@ export interface ExperimentalConfig {
+    * Default: 120000 (2 minutes).
+    */
+   streamIdleTimeoutMs?: number;
++  /**
++   * Maximum number of agent tool turns for VS Code and CN. 0 disables the
++   * protection. Default: 25.
++   */
++  maxAgentTurns?: number;
+ }
+ 
+ export interface AnalyticsConfig {
+diff --git a/core/llm/defaultSystemMessages.ts b/core/llm/defaultSystemMessages.ts
+index 430a6777d..341b37393 100644
+--- a/core/llm/defaultSystemMessages.ts
++++ b/core/llm/defaultSystemMessages.ts
+@@ -64,6 +64,14 @@ export const DEFAULT_AGENT_SYSTEM_MESSAGE = `\
+   You are in agent mode.
+ 
+   If you need to use multiple tools, you can call multiple read-only tools simultaneously.
++  Execute an available tool immediately when it is the right action. Do not announce
++  that you are going to read, search, analyze, inspect, edit, or run a tool before
++  issuing the tool call.
++  Do not mix planning narration with tool calls. Use text to request clarification,
++  explain completed results, or provide the final answer.
++  Do not repeat an action with the same tool arguments if the result is unchanged.
++  If a task requires more context, use a targeted read or search and stop after each
++  tool result instead of narrating the next step.
+ 
+ ${CODEBLOCK_FORMATTING_INSTRUCTIONS}
+ 
+@@ -80,6 +88,9 @@ export const DEFAULT_PLAN_SYSTEM_MESSAGE = `\
+   You are in plan mode, in which you help the user understand and construct a plan.
+   Only use read-only tools. Do not use any tools that would write to non-temporary files.
+   If the user wants to make changes, offer that they can switch to Agent mode to give you access to write tools to make the suggested updates.
++  Execute a read-only tool immediately when it is needed. Do not announce the next
++  tool action in prose before calling it.
++  Do not use an edit tool or terminal command to change project files in plan mode.
+ 
+ ${CODEBLOCK_FORMATTING_INSTRUCTIONS}
+ 
+diff --git a/core/protocol/ide.ts b/core/protocol/ide.ts
+index 5aec1ea9a..c61c00277 100644
+--- a/core/protocol/ide.ts
++++ b/core/protocol/ide.ts
+@@ -35,6 +35,14 @@ export type ToIdeFromWebviewOrCoreProtocol = {
+   fileExists: [{ filepath: string }, boolean];
+   readFile: [{ filepath: string }, string];
+   getProblems: [{ filepath: string }, Problem[]];
++  askQuestion: [
++    {
++      question: string;
++      options?: string[];
++      defaultAnswer?: string;
++    },
++    string | undefined,
++  ];
+   getOpenFiles: [undefined, string[]];
+   getCurrentFile: [
+     undefined,
+diff --git a/core/protocol/messenger/messageIde.ts b/core/protocol/messenger/messageIde.ts
+index 00b3bde9d..d672e4d5b 100644
+--- a/core/protocol/messenger/messageIde.ts
++++ b/core/protocol/messenger/messageIde.ts
+@@ -64,6 +64,14 @@ export class MessageIde implements IDE {
+     return this.request("getDocumentSymbols", { textDocumentIdentifier });
+   }
+ 
++  async askQuestion(args: {
++    question: string;
++    options?: string[];
++    defaultAnswer?: string;
++  }): Promise<string | undefined> {
++    return this.request("askQuestion", args);
++  }
++
+   onDidChangeActiveTextEditor(callback: (fileUri: string) => void): void {
+     this.on("didChangeActiveTextEditor", (data) => callback(data.filepath));
+   }
+diff --git a/core/tools/builtIn.ts b/core/tools/builtIn.ts
+index 0b1346bbc..4d2a0734b 100644
+--- a/core/tools/builtIn.ts
++++ b/core/tools/builtIn.ts
+@@ -17,6 +17,17 @@ export enum BuiltInToolNames {
+   FetchUrlContent = "fetch_url_content",
+   CodebaseTool = "codebase",
+   ReadSkill = "read_skill",
++  AskQuestion = "AskQuestion",
++  ReadManyFiles = "ReadManyFiles",
++  GitStatus = "GitStatus",
++  GitDiff = "GitDiff",
++  GitLog = "GitLog",
++  GetProblems = "GetProblems",
++  GetDocumentSymbols = "GetDocumentSymbols",
++  DotnetProjects = "DotnetProjects",
++  DotnetBuild = "DotnetBuild",
++  DotnetTest = "DotnetTest",
++  DotnetFormatCheck = "DotnetFormatCheck",
+ 
+   // excluded from allTools for now
+   ViewRepoMap = "view_repo_map",
+diff --git a/core/tools/callTool.ts b/core/tools/callTool.ts
+index 84c2cff2f..c6cddd04d 100644
+--- a/core/tools/callTool.ts
++++ b/core/tools/callTool.ts
+@@ -14,6 +14,17 @@ import { grepSearchImpl } from "./implementations/grepSearch";
+ import { lsToolImpl } from "./implementations/lsTool";
+ import { readCurrentlyOpenFileImpl } from "./implementations/readCurrentlyOpenFile";
+ import { readFileImpl } from "./implementations/readFile";
++import { askQuestionImpl } from "./implementations/askQuestion";
++import { gitDiffImpl, gitLogImpl, gitStatusImpl } from "./implementations/gitTools";
++import { getProblemsImpl } from "./implementations/getProblems";
++import { getDocumentSymbolsImpl } from "./implementations/getDocumentSymbols";
++import { readManyFilesImpl } from "./implementations/readManyFiles";
++import {
++  dotnetBuildImpl,
++  dotnetFormatCheckImpl,
++  dotnetProjectsImpl,
++  dotnetTestImpl,
++} from "./implementations/dotnetTools";
+ 
+ import { readFileRangeImpl } from "./implementations/readFileRange";
+ import { readSkillImpl } from "./implementations/readSkill";
+@@ -191,6 +202,28 @@ export async function callBuiltInTool(
+   extras: ToolExtras,
+ ): Promise<ContextItem[]> {
+   switch (functionName) {
++    case BuiltInToolNames.DotnetProjects:
++      return await dotnetProjectsImpl(args, extras);
++    case BuiltInToolNames.DotnetBuild:
++      return await dotnetBuildImpl(args, extras);
++    case BuiltInToolNames.DotnetTest:
++      return await dotnetTestImpl(args, extras);
++    case BuiltInToolNames.DotnetFormatCheck:
++      return await dotnetFormatCheckImpl(args, extras);
++    case BuiltInToolNames.ReadManyFiles:
++      return await readManyFilesImpl(args, extras);
++    case BuiltInToolNames.GitStatus:
++      return await gitStatusImpl(args, extras);
++    case BuiltInToolNames.GitDiff:
++      return await gitDiffImpl(args, extras);
++    case BuiltInToolNames.GitLog:
++      return await gitLogImpl(args, extras);
++    case BuiltInToolNames.GetProblems:
++      return await getProblemsImpl(args, extras);
++    case BuiltInToolNames.GetDocumentSymbols:
++      return await getDocumentSymbolsImpl(args, extras);
++    case BuiltInToolNames.AskQuestion:
++      return await askQuestionImpl(args, extras);
+     case BuiltInToolNames.ReadFile:
+       return await readFileImpl(args, extras);
+     case BuiltInToolNames.ReadFileRange:
+diff --git a/core/tools/definitions/askQuestion.ts b/core/tools/definitions/askQuestion.ts
+new file mode 100644
+index 000000000..3aa325afb
+--- /dev/null
++++ b/core/tools/definitions/askQuestion.ts
+@@ -0,0 +1,46 @@
++import { Tool } from "../..";
++import { BUILT_IN_GROUP_NAME, BuiltInToolNames } from "../builtIn";
++
++export const askQuestionTool: Tool = {
++  type: "function",
++  displayTitle: "Ask Question",
++  wouldLikeTo: "ask the user a question",
++  isCurrently: "asking the user",
++  hasAlready: "asked the user",
++  readonly: true,
++  isInstant: false,
++  group: BUILT_IN_GROUP_NAME,
++  function: {
++    name: BuiltInToolNames.AskQuestion,
++    description:
++      "Ask the user a focused clarification question before continuing. Use options for a short choice list or leave options empty for a free-form answer.",
++    parameters: {
++      type: "object",
++      required: ["question"],
++      properties: {
++        question: {
++          type: "string",
++          description: "The question to ask the user",
++        },
++        options: {
++          type: "array",
++          description: "Optional short list of choices",
++          items: {
++            type: "string",
++            description: "Choice label",
++          },
++        },
++        defaultAnswer: {
++          type: "string",
++          description: "Optional default free-form answer",
++        },
++      },
++    },
++  },
++  defaultToolPolicy: "allowedWithoutPermission",
++  systemMessageDescription: {
++    prefix:
++      "To ask the user a clarification question, use AskQuestion with a concise question.",
++  },
++  toolCallIcon: "QuestionMarkCircleIcon",
++};
+diff --git a/core/tools/definitions/dotnetTools.ts b/core/tools/definitions/dotnetTools.ts
+new file mode 100644
+index 000000000..0c51958ff
+--- /dev/null
++++ b/core/tools/definitions/dotnetTools.ts
+@@ -0,0 +1,99 @@
++import { Tool } from "../..";
++import { BUILT_IN_GROUP_NAME, BuiltInToolNames } from "../builtIn";
++
++export const dotnetProjectsTool: Tool = {
++  type: "function",
++  displayTitle: "Dotnet Projects",
++  wouldLikeTo: "find .NET projects",
++  isCurrently: "finding .NET projects",
++  hasAlready: "found .NET projects",
++  readonly: true,
++  isInstant: true,
++  group: BUILT_IN_GROUP_NAME,
++  function: {
++    name: BuiltInToolNames.DotnetProjects,
++    description:
++      "Find .sln, .slnx and .csproj files in the workspace",
++    parameters: {
++      type: "object",
++      properties: {
++        path: { type: "string", description: "Optional workspace path" },
++        limit: { type: "number", description: "Maximum results" },
++      },
++    },
++  },
++  defaultToolPolicy: "allowedWithoutPermission",
++};
++
++export const dotnetBuildTool: Tool = {
++  type: "function",
++  displayTitle: "Dotnet Build",
++  wouldLikeTo: "build the .NET project",
++  isCurrently: "building with dotnet",
++  hasAlready: "built the .NET project",
++  readonly: false,
++  isInstant: false,
++  group: BUILT_IN_GROUP_NAME,
++  function: {
++    name: BuiltInToolNames.DotnetBuild,
++    description:
++      "Build a .NET project or solution and return compiler diagnostics",
++    parameters: {
++      type: "object",
++      properties: {
++        path: { type: "string", description: "Project, solution or workspace path" },
++        configuration: { type: "string", description: "Debug or Release" },
++        noRestore: { type: "boolean", description: "Pass --no-restore" },
++      },
++    },
++  },
++  defaultToolPolicy: "allowedWithPermission",
++};
++
++export const dotnetTestTool: Tool = {
++  type: "function",
++  displayTitle: "Dotnet Test",
++  wouldLikeTo: "run .NET tests",
++  isCurrently: "running dotnet tests",
++  hasAlready: "ran .NET tests",
++  readonly: false,
++  isInstant: false,
++  group: BUILT_IN_GROUP_NAME,
++  function: {
++    name: BuiltInToolNames.DotnetTest,
++    description: "Run .NET tests for a project or solution",
++    parameters: {
++      type: "object",
++      properties: {
++        path: { type: "string", description: "Project, solution or workspace path" },
++        filter: { type: "string", description: "Optional dotnet test filter" },
++        noBuild: { type: "boolean", description: "Pass --no-build" },
++      },
++    },
++  },
++  defaultToolPolicy: "allowedWithPermission",
++};
++
++export const dotnetFormatCheckTool: Tool = {
++  type: "function",
++  displayTitle: "Dotnet Format Check",
++  wouldLikeTo: "check .NET formatting",
++  isCurrently: "checking dotnet format",
++  hasAlready: "checked .NET formatting",
++  readonly: true,
++  isInstant: true,
++  group: BUILT_IN_GROUP_NAME,
++  function: {
++    name: BuiltInToolNames.DotnetFormatCheck,
++    description:
++      "Run dotnet format --verify-no-changes without modifying files",
++    parameters: {
++      type: "object",
++      properties: {
++        path: { type: "string", description: "Project, solution or workspace path" },
++        noRestore: { type: "boolean", description: "Pass --no-restore" },
++      },
++    },
++  },
++  defaultToolPolicy: "allowedWithoutPermission",
++};
+diff --git a/core/tools/definitions/getDocumentSymbols.ts b/core/tools/definitions/getDocumentSymbols.ts
+new file mode 100644
+index 000000000..815e1f9d7
+--- /dev/null
++++ b/core/tools/definitions/getDocumentSymbols.ts
+@@ -0,0 +1,37 @@
++import { Tool } from "../..";
++import { BUILT_IN_GROUP_NAME, BuiltInToolNames } from "../builtIn";
++
++export const getDocumentSymbolsTool: Tool = {
++  type: "function",
++  displayTitle: "Document Symbols",
++  wouldLikeTo: "inspect file symbols",
++  isCurrently: "reading document symbols",
++  hasAlready: "read document symbols",
++  readonly: true,
++  isInstant: true,
++  group: BUILT_IN_GROUP_NAME,
++  function: {
++    name: BuiltInToolNames.GetDocumentSymbols,
++    description:
++      "Get classes, functions, methods and symbols for a file through the language server.",
++    parameters: {
++      type: "object",
++      required: ["filepath"],
++      properties: {
++        filepath: {
++          type: "string",
++          description: "File path",
++        },
++        kind: {
++          type: "string",
++          description: "Optional symbol kind filter",
++        },
++        limit: {
++          type: "number",
++          description: "Maximum number of symbols",
++        },
++      },
++    },
++  },
++  defaultToolPolicy: "allowedWithoutPermission",
++};
+diff --git a/core/tools/definitions/getProblems.ts b/core/tools/definitions/getProblems.ts
+new file mode 100644
+index 000000000..cd89ba7fa
+--- /dev/null
++++ b/core/tools/definitions/getProblems.ts
+@@ -0,0 +1,36 @@
++import { Tool } from "../..";
++import { BUILT_IN_GROUP_NAME, BuiltInToolNames } from "../builtIn";
++
++export const getProblemsTool: Tool = {
++  type: "function",
++  displayTitle: "Get Problems",
++  wouldLikeTo: "inspect diagnostics",
++  isCurrently: "reading diagnostics",
++  hasAlready: "read diagnostics",
++  readonly: true,
++  isInstant: true,
++  group: BUILT_IN_GROUP_NAME,
++  function: {
++    name: BuiltInToolNames.GetProblems,
++    description:
++      "Get compiler/editor diagnostics, optionally for one file.",
++    parameters: {
++      type: "object",
++      properties: {
++        filepath: {
++          type: "string",
++          description: "Optional file path",
++        },
++        severity: {
++          type: "string",
++          description: "Optional severity filter: error, warning, info",
++        },
++        limit: {
++          type: "number",
++          description: "Maximum number of diagnostics",
++        },
++      },
++    },
++  },
++  defaultToolPolicy: "allowedWithoutPermission",
++};
+diff --git a/core/tools/definitions/gitTools.ts b/core/tools/definitions/gitTools.ts
+new file mode 100644
+index 000000000..8ff0f0b9b
+--- /dev/null
++++ b/core/tools/definitions/gitTools.ts
+@@ -0,0 +1,73 @@
++import { Tool } from "../..";
++import { BUILT_IN_GROUP_NAME, BuiltInToolNames } from "../builtIn";
++
++export const gitStatusTool: Tool = {
++  type: "function",
++  displayTitle: "Git Status",
++  wouldLikeTo: "check the git working tree",
++  isCurrently: "checking git status",
++  hasAlready: "checked git status",
++  readonly: true,
++  isInstant: true,
++  group: BUILT_IN_GROUP_NAME,
++  function: {
++    name: BuiltInToolNames.GitStatus,
++    description: "Show the current git branch and working tree status",
++    parameters: {
++      type: "object",
++      properties: {
++        path: { type: "string", description: "Optional repository path" },
++      },
++    },
++  },
++  defaultToolPolicy: "allowedWithoutPermission",
++};
++
++export const gitDiffTool: Tool = {
++  type: "function",
++  displayTitle: "Git Diff",
++  wouldLikeTo: "inspect uncommitted changes",
++  isCurrently: "reading the git diff",
++  hasAlready: "read the git diff",
++  readonly: true,
++  isInstant: true,
++  group: BUILT_IN_GROUP_NAME,
++  function: {
++    name: BuiltInToolNames.GitDiff,
++    description: "Show uncommitted changes in the workspace",
++    parameters: {
++      type: "object",
++      properties: {
++        path: { type: "string", description: "Optional repository path" },
++        statOnly: {
++          type: "boolean",
++          description: "Return only file-level statistics",
++        },
++      },
++    },
++  },
++  defaultToolPolicy: "allowedWithoutPermission",
++};
++
++export const gitLogTool: Tool = {
++  type: "function",
++  displayTitle: "Git Log",
++  wouldLikeTo: "review recent commits",
++  isCurrently: "reading git history",
++  hasAlready: "read recent git history",
++  readonly: true,
++  isInstant: true,
++  group: BUILT_IN_GROUP_NAME,
++  function: {
++    name: BuiltInToolNames.GitLog,
++    description: "Show recent commits",
++    parameters: {
++      type: "object",
++      properties: {
++        path: { type: "string", description: "Optional repository path" },
++        limit: { type: "number", description: "Maximum commits, default 10" },
++      },
++    },
++  },
++  defaultToolPolicy: "allowedWithoutPermission",
++};
+diff --git a/core/tools/definitions/index.ts b/core/tools/definitions/index.ts
+index bfc78ac3d..771142fc7 100644
+--- a/core/tools/definitions/index.ts
++++ b/core/tools/definitions/index.ts
+@@ -1,4 +1,19 @@
+ export { codebaseTool } from "./codebaseTool";
++export { askQuestionTool } from "./askQuestion";
++export {
++  gitStatusTool,
++  gitDiffTool,
++  gitLogTool,
++} from "./gitTools";
++export { readManyFilesTool } from "./readManyFiles";
++export { getProblemsTool } from "./getProblems";
++export { getDocumentSymbolsTool } from "./getDocumentSymbols";
++export {
++  dotnetBuildTool,
++  dotnetTestTool,
++  dotnetFormatCheckTool,
++  dotnetProjectsTool,
++} from "./dotnetTools";
+ export { createNewFileTool } from "./createNewFile";
+ export { createRuleBlock } from "./createRuleBlock";
+ export { editFileTool } from "./editFile";
+diff --git a/core/tools/definitions/readManyFiles.ts b/core/tools/definitions/readManyFiles.ts
+new file mode 100644
+index 000000000..8831f69a9
+--- /dev/null
++++ b/core/tools/definitions/readManyFiles.ts
+@@ -0,0 +1,37 @@
++import { Tool } from "../..";
++import { BUILT_IN_GROUP_NAME, BuiltInToolNames } from "../builtIn";
++
++export const readManyFilesTool: Tool = {
++  type: "function",
++  displayTitle: "Read Many Files",
++  wouldLikeTo: "read multiple files",
++  isCurrently: "reading multiple files",
++  hasAlready: "read multiple files",
++  readonly: true,
++  isInstant: true,
++  group: BUILT_IN_GROUP_NAME,
++  function: {
++    name: BuiltInToolNames.ReadManyFiles,
++    description:
++      "Read several known files together. Prefer ReadFileRange for a large file.",
++    parameters: {
++      type: "object",
++      required: ["filepaths"],
++      properties: {
++        filepaths: {
++          type: "array",
++          description: "Known file paths to read",
++          items: {
++            type: "string",
++            description: "File path",
++          },
++        },
++        maxCharsPerFile: {
++          type: "number",
++          description: "Optional character limit per file",
++        },
++      },
++    },
++  },
++  defaultToolPolicy: "allowedWithoutPermission",
++};
+diff --git a/core/tools/implementations/askQuestion.ts b/core/tools/implementations/askQuestion.ts
+new file mode 100644
+index 000000000..ad3c13d24
+--- /dev/null
++++ b/core/tools/implementations/askQuestion.ts
+@@ -0,0 +1,38 @@
++import { ToolImpl } from ".";
++import { getStringArg } from "../parseArgs";
++
++export const askQuestionImpl: ToolImpl = async (args, extras) => {
++  const question = getStringArg(args, "question");
++  const options = Array.isArray(args.options)
++    ? args.options.filter((option: unknown): option is string =>
++        typeof option === "string",
++      )
++    : undefined;
++  const defaultAnswer =
++    typeof args.defaultAnswer === "string" ? args.defaultAnswer : undefined;
++
++  if (!extras.ide.askQuestion) {
++    return [
++      {
++        name: "Clarification required",
++        description: "Ask the user",
++        content: `The user must answer this question: ${question}`,
++      },
++    ];
++  }
++
++  const answer = await extras.ide.askQuestion({
++    question,
++    options,
++    defaultAnswer,
++  });
++  return [
++    {
++      name: "User response",
++      description: "Answer to clarification",
++      content: answer
++        ? `The user answered: ${answer}`
++        : "The user did not provide an answer.",
++    },
++  ];
++};
+diff --git a/core/tools/implementations/dotnetTools.ts b/core/tools/implementations/dotnetTools.ts
+new file mode 100644
+index 000000000..6b871d920
+--- /dev/null
++++ b/core/tools/implementations/dotnetTools.ts
+@@ -0,0 +1,134 @@
++import { ToolImpl } from ".";
++import { getStringArg } from "../parseArgs";
++
++function quoteForShell(value: string): string {
++  if (!value.includes(" ") && !value.includes("\t")) {
++    return value;
++  }
++  return `"${value.replace(/"/g, '\\"')}"`;
++}
++
++async function resolveDotnetCommand(
++  extras: any,
++  cwd?: string,
++): Promise<string | undefined> {
++  try {
++    const [stdout, stderr] = await extras.ide.subprocess(
++      "dotnet --version",
++      cwd,
++    );
++    if ((stdout || "").trim()) {
++      return "dotnet";
++    }
++    if ((stderr || "").includes("dotnet")) {
++      return "dotnet";
++    }
++  } catch {}
++
++  try {
++    const [whereOut] = await extras.ide.subprocess("where.exe dotnet", cwd);
++    const candidate = (whereOut || "")
++      .split(/\r?\n/)
++      .map((line: string) => line.trim())
++      .find((line: string) => line.toLowerCase().endsWith("dotnet.exe"));
++    if (candidate) {
++      return quoteForShell(candidate);
++    }
++  } catch {}
++
++  try {
++    const [powershellOut] = await extras.ide.subprocess(
++      'powershell.exe -NoProfile -Command "& (Join-Path $env:ProgramFiles \"dotnet\\dotnet.exe\") --version"',
++      cwd,
++    );
++    if ((powershellOut || "").trim()) {
++      return quoteForShell(
++        `${process.env?.ProgramFiles ?? "C:\\Program Files"}\\dotnet\\dotnet.exe`,
++      );
++    }
++  } catch {}
++  return undefined;
++}
++
++async function runDotnet(
++  extras: any,
++  cwd: string | undefined,
++  args: string[],
++): Promise<any[]> {
++  const executable = await resolveDotnetCommand(extras, cwd);
++  if (!executable) {
++    return [
++      {
++        name: "Dotnet",
++        description: "dotnet executable resolution",
++        content:
++          "No dotnet executable found on PATH or in the standard Windows .NET location. Install the .NET SDK or add dotnet.exe to PATH.",
++      },
++    ];
++  }
++  const [stdout, stderr] = await extras.ide.subprocess(
++    `${executable} ${args.map(quoteForShell).join(" ")}`,
++    cwd,
++  );
++  return [
++    {
++      name: "Dotnet",
++      description: "dotnet command output",
++      content: [stdout.trim(), stderr.trim()].filter(Boolean).join("\n"),
++    },
++  ];
++}
++
++export const dotnetProjectsImpl: ToolImpl = async (args, extras) => {
++  const cwd = typeof args.path === "string" ? getStringArg(args, "path") : undefined;
++  const patterns = ["*.csproj", "*.sln", "*.slnx"];
++  const results: string[] = [];
++  for (const pattern of patterns) {
++    const matches = await extras.ide.getFileResults(pattern, 100);
++    results.push(...matches);
++  }
++  const unique = Array.from(new Set(results)).slice(0, 200);
++  return [
++    {
++      name: "Dotnet Projects",
++      description: "Solutions and projects",
++      content:
++        unique.length > 0
++          ? unique.join("\n")
++          : "No .NET solution or project files found.",
++    },
++  ];
++};
++
++export const dotnetBuildImpl: ToolImpl = async (args, extras) => {
++  const cwd = typeof args.path === "string" ? getStringArg(args, "path") : undefined;
++  const commandArgs = ["build"];
++  if (typeof args.path === "string") commandArgs.push(args.path);
++  if (typeof args.configuration === "string") {
++    commandArgs.push("-c", args.configuration);
++  }
++  if (args.noRestore === true) commandArgs.push("--no-restore");
++  commandArgs.push("--nologo", "-v:minimal");
++  return await runDotnet(extras, cwd ? undefined : undefined, commandArgs);
++};
++
++export const dotnetTestImpl: ToolImpl = async (args, extras) => {
++  const cwd = typeof args.path === "string" ? getStringArg(args, "path") : undefined;
++  const commandArgs = ["test"];
++  if (typeof args.path === "string") commandArgs.push(args.path);
++  if (typeof args.filter === "string") {
++    commandArgs.push("--filter", args.filter);
++  }
++  if (args.noBuild === true) commandArgs.push("--no-build");
++  commandArgs.push("--nologo");
++  return await runDotnet(extras, cwd ? undefined : undefined, commandArgs);
++};
++
++export const dotnetFormatCheckImpl: ToolImpl = async (args, extras) => {
++  const cwd = typeof args.path === "string" ? getStringArg(args, "path") : undefined;
++  const commandArgs = ["format"];
++  if (typeof args.path === "string") commandArgs.push(args.path);
++  commandArgs.push("--verify-no-changes");
++  if (args.noRestore === true) commandArgs.push("--no-restore");
++  return await runDotnet(extras, cwd ? undefined : undefined, commandArgs);
++};
+diff --git a/core/tools/implementations/getDocumentSymbols.ts b/core/tools/implementations/getDocumentSymbols.ts
+new file mode 100644
+index 000000000..2d4fa68ee
+--- /dev/null
++++ b/core/tools/implementations/getDocumentSymbols.ts
+@@ -0,0 +1,43 @@
++import { ToolImpl } from ".";
++import { resolveInputPath } from "../../util/pathResolver";
++import { getStringArg } from "../parseArgs";
++
++export const getDocumentSymbolsImpl: ToolImpl = async (args, extras) => {
++  const filepath = getStringArg(args, "filepath");
++  const resolved = await resolveInputPath(extras.ide, filepath);
++  if (!resolved) {
++    throw new Error(`File not found: ${filepath}`);
++  }
++  const limit =
++    Number.isInteger(args.limit) && args.limit > 0
++      ? Math.min(args.limit, 500)
++      : 200;
++  const kind =
++    typeof args.kind === "string" ? args.kind.toLowerCase() : undefined;
++  const symbols = await extras.ide.getDocumentSymbols(resolved.uri);
++  const filtered = kind
++    ? symbols.filter((symbol: any) =>
++        String(symbol.kind ?? "").toLowerCase().includes(kind),
++      )
++    : symbols;
++  const limited = filtered.slice(0, limit);
++  return [
++    {
++      name: "Document Symbols",
++      description: resolved.displayPath,
++      content:
++        limited.length > 0
++          ? limited
++              .map((symbol: any) => {
++                const line =
++                  symbol.range?.start?.line !== undefined
++                    ? `:${symbol.range.start.line + 1}`
++                    : "";
++                return `${symbol.name}${line}`;
++              })
++              .join("\n")
++          : "No symbols found.",
++      uri: { type: "file" as const, value: resolved.uri },
++    },
++  ];
++};
+diff --git a/core/tools/implementations/getProblems.ts b/core/tools/implementations/getProblems.ts
+new file mode 100644
+index 000000000..06c27af89
+--- /dev/null
++++ b/core/tools/implementations/getProblems.ts
+@@ -0,0 +1,41 @@
++import { ToolImpl } from ".";
++
++export const getProblemsImpl: ToolImpl = async (args, extras) => {
++  const filepath =
++    typeof args.filepath === "string" ? args.filepath : undefined;
++  const severity =
++    typeof args.severity === "string" ? args.severity.toLowerCase() : undefined;
++  const limit =
++    Number.isInteger(args.limit) && args.limit > 0
++      ? Math.min(args.limit, 500)
++      : 200;
++  const problems = await extras.ide.getProblems(filepath);
++  const filtered = severity
++    ? problems.filter(
++        (problem: any) =>
++          String(problem.severity ?? "").toLowerCase() === severity,
++      )
++    : problems;
++  const limited = filtered.slice(0, limit);
++  if (limited.length === 0) {
++    return [
++      {
++        name: "Problems",
++        description: "Diagnostics",
++        content: "No problems found.",
++      },
++    ];
++  }
++  return [
++    {
++      name: "Problems",
++      description: `${limited.length} diagnostics`,
++      content: limited
++        .map((problem: any) => {
++          const line = problem.range?.start?.line;
++          return `${problem.filepath}${line !== undefined ? `:${line + 1}` : ""}: ${problem.message}`;
++        })
++        .join("\n"),
++    },
++  ];
++};
+diff --git a/core/tools/implementations/gitTools.ts b/core/tools/implementations/gitTools.ts
+new file mode 100644
+index 000000000..1fc09c126
+--- /dev/null
++++ b/core/tools/implementations/gitTools.ts
+@@ -0,0 +1,63 @@
++import { ToolImpl } from ".";
++import { getNumberArg, getStringArg } from "../parseArgs";
++
++export const gitStatusImpl: ToolImpl = async (args, extras) => {
++  const cwd = args.path ? getStringArg(args, "path") : undefined;
++  const [stdout, stderr] = await extras.ide.subprocess(
++    "git status --short --branch",
++    cwd,
++  );
++  return [
++    {
++      name: "Git Status",
++      description: "Working tree status",
++      content: [stdout.trim(), stderr.trim()].filter(Boolean).join("\n"),
++    },
++  ];
++};
++
++export const gitDiffImpl: ToolImpl = async (args, extras) => {
++  const cwd = args.path ? getStringArg(args, "path") : undefined;
++  const statOnly = args.statOnly === true;
++  const [statOut, statErr] = await extras.ide.subprocess(
++    "git diff --stat",
++    cwd,
++  );
++  if (statOnly) {
++    return [
++      {
++        name: "Git Diff",
++        description: "Uncommitted change summary",
++        content: [statOut.trim(), statErr.trim()].filter(Boolean).join("\n"),
++      },
++    ];
++  }
++  const [diffOut, diffErr] = await extras.ide.subprocess("git diff", cwd);
++  return [
++    {
++      name: "Git Diff",
++      description: "Uncommitted changes",
++      content: [statOut.trim(), statErr.trim(), diffOut.trim(), diffErr.trim()]
++        .filter(Boolean)
++        .join("\n"),
++    },
++  ];
++};
++
++export const gitLogImpl: ToolImpl = async (args, extras) => {
++  const cwd = args.path ? getStringArg(args, "path") : undefined;
++  const limit =
++    args.limit !== undefined ? getNumberArg(args, "limit") : 10;
++  const capped = Math.max(1, Math.min(limit, 100));
++  const [stdout, stderr] = await extras.ide.subprocess(
++    `git log -${capped} --date=short --pretty=format:%h %ad %s`,
++    cwd,
++  );
++  return [
++    {
++      name: "Git Log",
++      description: "Recent commits",
++      content: [stdout.trim(), stderr.trim()].filter(Boolean).join("\n"),
++    },
++  ];
++};
+diff --git a/core/tools/implementations/readManyFiles.ts b/core/tools/implementations/readManyFiles.ts
+new file mode 100644
+index 000000000..c907cc21d
+--- /dev/null
++++ b/core/tools/implementations/readManyFiles.ts
+@@ -0,0 +1,42 @@
++import { ToolImpl } from ".";
++import { resolveInputPath } from "../../util/pathResolver";
++import { getNumberArg } from "../parseArgs";
++
++export const readManyFilesImpl: ToolImpl = async (args, extras) => {
++  if (!Array.isArray(args.filepaths)) {
++    throw new Error("filepaths must be an array");
++  }
++  const limit =
++    args.maxCharsPerFile !== undefined
++      ? getNumberArg(args, "maxCharsPerFile")
++      : 100000;
++  const maxChars = Math.max(1000, Math.min(limit, 500000));
++  const items = [];
++  for (const filepath of args.filepaths.slice(0, 20)) {
++    if (typeof filepath !== "string") {
++      continue;
++    }
++    const resolved = await resolveInputPath(extras.ide, filepath);
++    if (!resolved) {
++      items.push({
++        name: filepath,
++        description: "File not found",
++        content: "The file could not be resolved.",
++      });
++      continue;
++    }
++    const content = await extras.ide.readFile(resolved.uri);
++    const truncated =
++      content.length > maxChars
++        ? content.slice(0, maxChars) +
++          `\n\n[${content.length - maxChars} characters truncated; use ReadFileRange]`
++        : content;
++    items.push({
++      name: filepath,
++      description: resolved.displayPath,
++      content: truncated,
++      uri: { type: "file" as const, value: resolved.uri },
++    });
++  }
++  return items;
++};
+diff --git a/core/tools/index.ts b/core/tools/index.ts
+index f03eca031..fd3d6bac6 100644
+--- a/core/tools/index.ts
++++ b/core/tools/index.ts
+@@ -5,6 +5,18 @@ import * as toolDefinitions from "./definitions";
+ // I'm writing these as functions because we've messed up 3 TIMES by pushing to const, causing duplicate tool definitions on subsequent config loads.
+ export const getBaseToolDefinitions = () => [
+   toolDefinitions.readFileTool,
++  toolDefinitions.readFileRangeTool,
++  toolDefinitions.askQuestionTool,
++  toolDefinitions.readManyFilesTool,
++  toolDefinitions.gitStatusTool,
++  toolDefinitions.gitDiffTool,
++  toolDefinitions.gitLogTool,
++  toolDefinitions.getProblemsTool,
++  toolDefinitions.getDocumentSymbolsTool,
++  toolDefinitions.dotnetProjectsTool,
++  toolDefinitions.dotnetBuildTool,
++  toolDefinitions.dotnetTestTool,
++  toolDefinitions.dotnetFormatCheckTool,
+   toolDefinitions.createNewFileTool,
+   toolDefinitions.runTerminalCommandTool,
+   toolDefinitions.globSearchTool,
+diff --git a/core/tools/systemMessageTools/toolCodeblocks/index.ts b/core/tools/systemMessageTools/toolCodeblocks/index.ts
+index 3acddb70f..44c8e6921 100644
+--- a/core/tools/systemMessageTools/toolCodeblocks/index.ts
++++ b/core/tools/systemMessageTools/toolCodeblocks/index.ts
+@@ -67,7 +67,10 @@ export class SystemMessageToolCodeblocksFramework
+ 
+   systemMessagePrefix = `You have access to tools. To call a tool, you MUST respond with EXACTLY the tool code block format shown below.
+ 
+-CRITICAL: Follow the exact syntax. Do not use XML tags, JSON objects, or any other format for tool calls.`;
++CRITICAL: Follow the exact syntax. Do not use XML tags, JSON objects, or any other format for tool calls.
++When an available tool is the correct next action, execute it immediately.
++Do not write "I will read/search/analyze/edit/run" before the tool call.
++Do not mix planning narration with tool calls.`;
+ 
+   systemMessageSuffix = `RULES FOR TOOL USE:
+ 1. To call a tool, output a tool code block using EXACTLY the format shown above.
+@@ -78,7 +81,9 @@ CRITICAL: Follow the exact syntax. Do not use XML tags, JSON objects, or any oth
+ 6. Do NOT use JSON format for tool calls.
+ 7. Do NOT invent tools that are not listed above.
+ 8. If the user's request can be addressed with a listed tool, use it rather than guessing.
+-9. Do not perform actions with hypothetical files. Use tools to find relevant files.`;
++9. Do not perform actions with hypothetical files. Use tools to find relevant files.
++10. Do not repeat the same tool call with the same arguments when it produces no new result.
++11. Use prose only for clarification, a concise tool result summary, or the final answer.`;
+ 
+   exampleDynamicToolDefinition = `
+ \`\`\`tool_definition
+@@ -125,3 +130,19 @@ END_ARG`;
+ ${callExample}`;
+   }
+ }
++
++export function looksLikeToolAnnouncement(content: string): boolean {
++  const text = content.trim();
++  if (!text) {
++    return false;
++  }
++  const lower = text.toLowerCase();
++  const announcements =
++    /\b(i(?:'|’)ll|i will|i'm going to|i am going to|let me|i need to|i should|i have to|next i(?:'|’)ll|je vais|je dois|je vais devoir|j'utilise|je vais utiliser)\b/i;
++  const actionWords =
++    /\b(read|search|inspect|analyze|analyse|edit|modify|run|grep|glob|list|check|fetch|open)\w*\b/i;
++  return (
++    announcements.test(lower) ||
++    (actionWords.test(lower) && lower.length < 600)
++  );
++}
+diff --git a/core/tools/toolCallSanitization.ts b/core/tools/toolCallSanitization.ts
+index f8f1248cf..061cd77fa 100644
+--- a/core/tools/toolCallSanitization.ts
++++ b/core/tools/toolCallSanitization.ts
+@@ -87,6 +87,13 @@ const READ_ONLY_TOOL_ALIASES: Record<string, readonly string[]> = {
+   fetch_url_content: ["Fetch", "fetchUrl"],
+   view_diff: ["Diff", "viewDiff"],
+   read_currently_open_file: ["ReadCurrentlyOpenFile"],
++  ask_question: ["AskQuestion", "askQuestion"],
++  read_many_files: ["ReadManyFiles", "readManyFiles", "ReadMany"],
++  git_status: ["GitStatus", "gitStatus"],
++  git_diff: ["GitDiff", "gitDiff"],
++  git_log: ["GitLog", "gitLog"],
++  get_problems: ["GetProblems", "getProblems", "Problems"],
++  get_document_symbols: ["GetDocumentSymbols", "getDocumentSymbols", "DocumentSymbols"],
+ };
+ 
+ function findReadOnlyAlias(
+@@ -337,9 +344,19 @@ const ARGUMENT_ALIASES: Record<string, readonly string[]> = {
+   file_path: ["filepath", "filePath", "path", "filename", "file"],
+   old_string: ["old_str", "oldText", "old_text"],
+   new_string: ["new_str", "newText", "new_text"],
++  startLine: ["start_line", "start", "fromLine", "from_line"],
++  endLine: ["end_line", "end", "toLine", "to_line"],
++  dirpath: ["dir_path", "directory", "dirPath"],
++  dirPath: ["dir_path", "directory", "dirpath"],
++  replace_all: ["replaceAll", "replaceall"],
+   command: ["cmd"],
+   pattern: ["query", "regex"],
+   content: ["contents", "text"],
++  filepaths: ["files", "paths", "file_paths"],
++  maxCharsPerFile: ["max_chars", "maxChars", "limitPerFile"],
++  statOnly: ["stat_only", "summaryOnly"],
++  severity: ["level"],
++  kind: ["symbolKind"],
+ };
+ 
+ /**
+diff --git a/extensions/cli/src/commands/commands.ts b/extensions/cli/src/commands/commands.ts
+index 9ade4a02f..f9214ca6e 100644
+--- a/extensions/cli/src/commands/commands.ts
++++ b/extensions/cli/src/commands/commands.ts
+@@ -28,6 +28,11 @@ export const SYSTEM_SLASH_COMMANDS: SystemCommand[] = [
+     description: "Show help message",
+     category: "system",
+   },
++  {
++    name: "cd",
++    description: "Change the current workspace folder",
++    category: "system",
++  },
+   {
+     name: "clear",
+     description: "Clear the chat history",
+diff --git a/extensions/cli/src/services/MCPService.ts b/extensions/cli/src/services/MCPService.ts
+index 2d8474810..016f5bbde 100644
+--- a/extensions/cli/src/services/MCPService.ts
++++ b/extensions/cli/src/services/MCPService.ts
+@@ -1,4 +1,5 @@
+ import { decodeFQSN, getTemplateVariables } from "@continuedev/config-yaml";
++import { getToolNameFromMCPServer } from "core/tools/mcpToolName.js";
+ import { type AssistantConfig } from "@continuedev/sdk";
+ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
+ 
+@@ -111,7 +112,13 @@ export class MCPService
+     const connectedServers = connections.filter(
+       (c) => c.status === "connected",
+     );
+-    const tools = connectedServers.flatMap((s) => s.tools);
++    const tools = connectedServers.flatMap((server) =>
++      server.tools.map((tool) => ({
++        ...tool,
++        name: getToolNameFromMCPServer(server.name, tool.name),
++        originalName: tool.name,
++      })),
++    );
+     const prompts = connectedServers.flatMap((s) => s.prompts);
+ 
+     const newState: MCPServiceState = {
+@@ -192,7 +199,7 @@ export class MCPService
+               throw new Error(`Client for ${serverName} not available`);
+             }
+             return await conn.client.callTool({
+-              name,
++              name: (tool as MCPTool & { originalName?: string }).originalName ?? tool.name,
+               arguments: args,
+             });
+           });
+diff --git a/extensions/cli/src/slashCommands.ts b/extensions/cli/src/slashCommands.ts
+index ed0db1e04..95e0afa85 100644
+--- a/extensions/cli/src/slashCommands.ts
++++ b/extensions/cli/src/slashCommands.ts
+@@ -15,6 +15,7 @@ import { serviceContainer } from "./services/ServiceContainer.js";
+ import { services } from "./services/index.js";
+ import { SERVICE_NAMES } from "./services/types.js";
+ import { telemetryService } from "./telemetry/telemetryService.js";
++import { changeWorkspace } from "./util/workspace.js";
+ import { buildImportSkillPrompt } from "./tools/skills.js";
+ import { SlashCommandResult } from "./ui/hooks/useChat.types.js";
+ import {
+@@ -51,6 +52,7 @@ async function handleHelp(_args: string[], _assistant: AssistantConfig) {
+     `  ${chalk.cyan("@")}          Search and attach files for context`,
+     `  ${chalk.cyan("/")}          Access slash commands`,
+     `  ${chalk.cyan("!")}          Execute bash commands directly`,
++    `  ${chalk.cyan("cd <folder>")} Change workspace folder`,
+     "",
+     chalk.white("Available Commands:"),
+     `  Type ${chalk.cyan("/")} to see available slash commands`,
+@@ -272,6 +274,15 @@ function syncToolPermissionState(): void {
+ 
+ const commandHandlers: Record<string, CommandHandler> = {
+   help: handleHelp,
++  cd: (args) => {
++    const result = changeWorkspace(args.join(" "));
++    if (result.success) {
++      try {
++        void services.fileIndex?.refreshIndex(true);
++      } catch {}
++    }
++    return { output: result.message };
++  },
+   clear: () => {
+     return { clear: true, output: "Chat history cleared" };
+   },
+diff --git a/extensions/cli/src/stream/streamChatResponse.ts b/extensions/cli/src/stream/streamChatResponse.ts
+index f65b145de..d46a2374e 100644
+--- a/extensions/cli/src/stream/streamChatResponse.ts
++++ b/extensions/cli/src/stream/streamChatResponse.ts
+@@ -16,6 +16,7 @@ import { ToolCall } from "../tools/index.js";
+ import {
+   chatCompletionToolToDescription,
+   extractToolCallsFromText,
++  looksLikeToolAnnouncement,
+ } from "../tools/textToolMode.js";
+ import { isContextLengthError } from "../util/exponentialBackoff.js";
+ import { logger } from "../util/logger.js";
+@@ -33,6 +34,25 @@ import type { ResilientStreamResult } from "./streamResilience.js";
+ 
+ dotenv.config();
+ 
++const DEFAULT_MAX_AGENT_TURNS = 25;
++
++function getMaxAgentTurns(): number {
++  const configured = Number(process.env.CONTINUE_MAX_AGENT_TURNS);
++  if (Number.isInteger(configured) && configured > 0) {
++    return configured;
++  }
++  return DEFAULT_MAX_AGENT_TURNS;
++}
++
++function stableToolCallSignature(toolCalls: ToolCall[]): string {
++  return JSON.stringify(
++    toolCalls.map((call) => ({
++      name: call.name,
++      arguments: call.arguments,
++    })),
++  );
++}
++
+ function updateFinalResponse(
+   content: string,
+   shouldContinue: boolean,
+@@ -221,8 +241,8 @@ export async function processStreamingResponse(
+     throw error;
+   }
+ 
+-  const aiResponse = streamResult.aiResponse;
+-  const fullUsage = streamResult.usage;
++  let aiResponse = streamResult.aiResponse;
++  let fullUsage = streamResult.usage;
+ 
+   if (streamResult.aborted) {
+     return {
+@@ -253,6 +273,47 @@ export async function processStreamingResponse(
+         names: textToolCalls.map((tc) => tc.name),
+       });
+       validToolCalls = textToolCalls;
++    } else if (looksLikeToolAnnouncement(aiResponse)) {
++      // Some text-only models announce the intended action but omit the tool
++      // block. Retry once with an explicit no-narration nudge instead of ending
++      // the turn or waiting for the user.
++      const nudgeMessages = [
++        ...openaiChatHistory,
++        {
++          role: "assistant" as const,
++          content: aiResponse,
++        },
++        {
++          role: "user" as const,
++          content:
++            "Do not announce the next action. Execute the required available tool now. " +
++            "Return only tool call blocks; do not add prose before or after.",
++        },
++      ];
++      const nudgeResult = await consumeStreamWithResilience({
++        llmApi,
++        model,
++        abortController,
++        callbacks,
++        isHeadless,
++        tools,
++        toolMode,
++        baseMessages: nudgeMessages,
++        requestStartTime,
++      });
++      aiResponse = nudgeResult.aiResponse;
++      fullUsage = nudgeResult.usage;
++      const nudgeParsed = extractToolCallsFromText(
++        nudgeResult.aiResponse,
++        allowedNames,
++      );
++      if (nudgeParsed.hasToolCalls) {
++        logger.debug("Recovered tool call after text-mode announcement nudge", {
++          count: nudgeParsed.toolCalls.length,
++          names: nudgeParsed.toolCalls.map((tc) => tc.name),
++        });
++        validToolCalls = nudgeParsed.toolCalls;
++      }
+     }
+   }
+ 
+@@ -289,6 +350,9 @@ export async function streamChatResponse(
+   let fullResponse = "";
+   let finalResponse = "";
+   let compactionOccurredThisTurn = false; // Track if compaction happened during this conversation turn
++  let agentTurnCount = 0;
++  const repeatedToolCalls = new Map<string, number>();
++  const maxAgentTurns = getMaxAgentTurns();
+ 
+   while (true) {
+     // If ChatHistoryService is available, refresh local chatHistory view
+@@ -353,6 +417,37 @@ export async function streamChatResponse(
+         systemMessage,
+       });
+ 
++    if (toolCalls.length > 0) {
++      agentTurnCount++;
++
++      if (agentTurnCount > maxAgentTurns) {
++        const limitMessage =
++          `Stopped after ${maxAgentTurns} agent tool turns. ` +
++          `Break the remaining work into smaller steps and continue.`;
++        logger.warn(limitMessage);
++        callbacks?.onSystemMessage?.(limitMessage);
++        if (services.chatHistory?.isReady()) {
++          services.chatHistory.addSystemMessage(limitMessage);
++        }
++        return finalResponse || content || fullResponse;
++      }
++
++      const signature = stableToolCallSignature(toolCalls);
++      const repeatedCount = (repeatedToolCalls.get(signature) ?? 0) + 1;
++      repeatedToolCalls.set(signature, repeatedCount);
++      if (repeatedCount >= 3) {
++        const repeatedMessage =
++          `Stopped because the same tool call was repeated 3 times without a new result: ` +
++          `${toolCalls.map((call) => call.name).join(", ")}.`;
++        logger.warn(repeatedMessage);
++        callbacks?.onSystemMessage?.(repeatedMessage);
++        if (services.chatHistory?.isReady()) {
++          services.chatHistory.addSystemMessage(repeatedMessage);
++        }
++        return finalResponse || content || fullResponse;
++      }
++    }
++
+     if (abortController?.signal.aborted) {
+       return finalResponse || content || fullResponse;
+     }
+diff --git a/extensions/cli/src/systemMessage.ts b/extensions/cli/src/systemMessage.ts
+index 1482cd237..1cc93f6de 100644
+--- a/extensions/cli/src/systemMessage.ts
++++ b/extensions/cli/src/systemMessage.ts
+@@ -49,6 +49,9 @@ const baseSystemMessage = `You are an agent in the Continue CLI. Given the user'
+ Notes:
+ 1. IMPORTANT: You should be concise, direct, and to the point, since your responses will be displayed on a command line interface.
+ 2. When relevant, share file names and code snippets relevant to the query
++3. When an available tool is the correct next action, execute it immediately. Do not announce that you are going to read, search, analyze, inspect, edit, or run a tool before issuing the call.
++4. Do not narrate planned tool actions or repeat them in prose. Use text for clarification, concise results, or the final answer.
++5. Do not repeat the same tool call with the same arguments when it produces no new information.
+ Here is useful information about the environment you are running in:
+ <env>
+ Working directory: ${process.cwd()}
+diff --git a/extensions/cli/src/tools/allBuiltIns.ts b/extensions/cli/src/tools/allBuiltIns.ts
+index a7a501c71..c7efed75b 100644
+--- a/extensions/cli/src/tools/allBuiltIns.ts
++++ b/extensions/cli/src/tools/allBuiltIns.ts
+@@ -4,9 +4,19 @@ import { askQuestionTool } from "./askQuestion.js";
+ import { editTool } from "./edit.js";
+ import { exitTool } from "./exit.js";
+ import { fetchTool } from "./fetch.js";
++import {
++  dotnetBuildTool,
++  dotnetFormatCheckTool,
++  dotnetProjectsTool,
++  dotnetTestTool,
++} from "./dotnetTools.js";
++import { globFilesTool } from "./globFiles.js";
++import { gitDiffTool, gitLogTool, gitStatusTool } from "./gitTools.js";
+ import { listFilesTool } from "./listFiles.js";
+ import { multiEditTool } from "./multiEdit.js";
+ import { readFileTool } from "./readFile.js";
++import { readFileRangeTool } from "./readFileRange.js";
++import { readManyFilesTool } from "./readManyFiles.js";
+ import { reportFailureTool } from "./reportFailure.js";
+ import { runTerminalCommandTool } from "./runTerminalCommand.js";
+ import { searchCodeTool } from "./searchCode.js";
+@@ -23,9 +33,19 @@ export const ALL_BUILT_IN_TOOLS = [
+   editTool,
+   exitTool,
+   fetchTool,
++  dotnetBuildTool,
++  dotnetTestTool,
++  dotnetFormatCheckTool,
++  dotnetProjectsTool,
++  globFilesTool,
++  gitDiffTool,
++  gitLogTool,
++  gitStatusTool,
+   listFilesTool,
+   multiEditTool,
+   readFileTool,
++  readFileRangeTool,
++  readManyFilesTool,
+   reportFailureTool,
+   runTerminalCommandTool,
+   searchCodeTool,
+diff --git a/extensions/cli/src/tools/dotnetTools.ts b/extensions/cli/src/tools/dotnetTools.ts
+new file mode 100644
+index 000000000..8b9b0f104
+--- /dev/null
++++ b/extensions/cli/src/tools/dotnetTools.ts
+@@ -0,0 +1,323 @@
++import { execFile } from "node:child_process";
++import fs from "node:fs";
++import path from "node:path";
++import { promisify } from "node:util";
++
++import { glob } from "glob";
++
++import { Tool } from "./types.js";
++
++const execFileAsync = promisify(execFile);
++
++function findDotnetExecutable(): string | undefined {
++  const roots = [
++    process.env.DOTNET_ROOT,
++    process.env.DOTNET_ROOT_X64,
++    process.env.ProgramFiles
++      ? path.join(process.env.ProgramFiles, "dotnet")
++      : undefined,
++    process.env["ProgramFiles(x86)"]
++      ? path.join(process.env["ProgramFiles(x86)"], "dotnet")
++      : undefined,
++    process.env.HOME ? path.join(process.env.HOME, ".dotnet") : undefined,
++  ].filter((value): value is string => !!value);
++  for (const root of roots) {
++    const candidate = process.platform === "win32"
++      ? path.join(root, "dotnet.exe")
++      : path.join(root, "dotnet");
++    if (fs.existsSync(candidate)) {
++      return candidate;
++    }
++  }
++  return undefined;
++}
++
++function findMSBuildExecutable(): string | undefined {
++  if (process.platform !== "win32") {
++    return undefined;
++  }
++  const roots = [
++    process.env.ProgramFiles
++      ? path.join(process.env.ProgramFiles, "Microsoft Visual Studio")
++      : undefined,
++    process.env["ProgramFiles(x86)"]
++      ? path.join(process.env["ProgramFiles(x86)"], "Microsoft Visual Studio")
++      : undefined,
++  ].filter((value): value is string => !!value);
++  for (const root of roots) {
++    if (!fs.existsSync(root)) continue;
++    for (const year of ["2022", "2019", "2017"]) {
++      const yearDir = path.join(root, year);
++      if (!fs.existsSync(yearDir)) continue;
++      for (const edition of ["Enterprise", "Professional", "Community", "BuildTools"]) {
++        const candidate = path.join(
++          yearDir,
++          edition,
++          "MSBuild",
++          "Current",
++          "Bin",
++          "MSBuild.exe",
++        );
++        if (fs.existsSync(candidate)) {
++          return candidate;
++        }
++      }
++    }
++  }
++  return undefined;
++}
++
++function resolveTarget(target?: string, cwd: string = process.cwd()) {
++  if (!target) {
++    return cwd;
++  }
++  return path.resolve(cwd, target);
++}
++
++async function runDotnet(
++  cwd: string,
++  args: string[],
++): Promise<string> {
++  const executable = findDotnetExecutable();
++  if (!executable) {
++    try {
++      const { stdout, stderr } = await execFileAsync("dotnet", ["--version"], {
++        cwd,
++      });
++      if (stdout.trim()) {
++        const fallback = await execFileAsync("dotnet", args, { cwd });
++        return [fallback.stdout.trim(), fallback.stderr.trim()]
++          .filter(Boolean)
++          .join("\n");
++      }
++      return [stdout.trim(), stderr.trim()].filter(Boolean).join("\n");
++    } catch (error) {
++      const msbuild = findMSBuildExecutable();
++      if (msbuild && args[0] === "build") {
++        const msbuildArgs: string[] = [];
++        for (let i = 1; i < args.length; i++) {
++          const arg = args[i];
++          if (arg === "-c" && args[i + 1]) {
++            msbuildArgs.push(`/p:Configuration=${args[i + 1]}`);
++            i++;
++          } else if (
++            arg !== "--no-restore" &&
++            arg !== "--nologo" &&
++            !arg.startsWith("-v:")
++          ) {
++            msbuildArgs.push(arg);
++          }
++        }
++        try {
++          const result = await execFileAsync(msbuild, [
++            ...msbuildArgs,
++            "/nologo",
++            "/m",
++          ], { cwd });
++          return [result.stdout.trim(), result.stderr.trim()]
++            .filter(Boolean)
++            .join("\n");
++        } catch (msbuildError) {
++          return `No usable dotnet executable or Visual Studio MSBuild found. ${msbuildError instanceof Error ? msbuildError.message : String(msbuildError)}`;
++        }
++      }
++      return `No dotnet executable found on PATH or in DOTNET_ROOT/Program Files. ${error instanceof Error ? error.message : String(error)}`;
++    }
++  }
++  try {
++    const { stdout, stderr } = await execFileAsync(executable, args, { cwd });
++    return [stdout.trim(), stderr.trim()].filter(Boolean).join("\n");
++  } catch (error) {
++    const execError = error as {
++      stdout?: string;
++      stderr?: string;
++      message?: string;
++    };
++    return [
++      execError.stdout?.trim(),
++      execError.stderr?.trim(),
++      execError.message,
++    ]
++      .filter(Boolean)
++      .join("\n");
++  }
++}
++
++export const dotnetProjectsTool: Tool = {
++  name: "DotnetProjects",
++  displayName: "Dotnet Projects",
++  description:
++    "Find .sln, .slnx and .csproj files in the current workspace",
++  parameters: {
++    type: "object",
++    properties: {
++      path: { type: "string", description: "Optional workspace path" },
++      limit: { type: "number", description: "Maximum results" },
++    },
++  },
++  readonly: true,
++  isBuiltIn: true,
++  run: async (args: { path?: string; limit?: number }) => {
++    const cwd = resolveTarget(args.path);
++    const limit =
++      Number.isInteger(args.limit) && (args.limit ?? 0) > 0
++        ? Math.min(args.limit ?? 100, 500)
++        : 100;
++    const matches = await glob(["**/*.sln", "**/*.slnx", "**/*.csproj"], {
++      cwd,
++      absolute: false,
++      nodir: true,
++      dot: false,
++      ignore: [
++        "**/node_modules/**",
++        "**/.git/**",
++        "**/bin/**",
++        "**/obj/**",
++        "**/.vs/**",
++      ],
++    });
++    const limited = matches.slice(0, limit);
++    return limited.length > 0
++      ? `Dotnet project/solution files:\n${limited.join("\n")}`
++      : "No .NET solution or project files found.";
++  },
++};
++
++export const dotnetBuildTool: Tool = {
++  name: "DotnetBuild",
++  displayName: "Dotnet Build",
++  description:
++    "Build a .NET solution or project and return compiler output",
++  parameters: {
++    type: "object",
++    properties: {
++      path: {
++        type: "string",
++        description: "Optional project, solution or workspace path",
++      },
++      configuration: {
++        type: "string",
++        description: "Optional configuration such as Debug or Release",
++      },
++      noRestore: {
++        type: "boolean",
++        description: "Add --no-restore",
++      },
++    },
++  },
++  readonly: false,
++  isBuiltIn: true,
++  run: async (args: {
++    path?: string;
++    configuration?: string;
++    noRestore?: boolean;
++  }) => {
++    const cwd = resolveTarget(args.path);
++    const target = fs.existsSync(cwd) && fs.statSync(cwd).isDirectory()
++      ? cwd
++      : path.dirname(cwd);
++    const targetArg =
++      fs.existsSync(cwd) && !fs.statSync(cwd).isDirectory() ? cwd : undefined;
++    const dotnetArgs = ["build"];
++    if (targetArg) {
++      dotnetArgs.push(targetArg);
++    }
++    if (args.configuration) {
++      dotnetArgs.push("-c", args.configuration);
++    }
++    if (args.noRestore) {
++      dotnetArgs.push("--no-restore");
++    }
++    dotnetArgs.push("--nologo", "-v:minimal");
++    return await runDotnet(target, dotnetArgs);
++  },
++};
++
++export const dotnetTestTool: Tool = {
++  name: "DotnetTest",
++  displayName: "Dotnet Test",
++  description:
++    "Run .NET tests for a solution/project or workspace",
++  parameters: {
++    type: "object",
++    properties: {
++      path: {
++        type: "string",
++        description: "Optional project, solution or workspace path",
++      },
++      filter: {
++        type: "string",
++        description: "Optional dotnet test filter",
++      },
++      noBuild: {
++        type: "boolean",
++        description: "Add --no-build",
++      },
++    },
++  },
++  readonly: false,
++  isBuiltIn: true,
++  run: async (args: {
++    path?: string;
++    filter?: string;
++    noBuild?: boolean;
++  }) => {
++    const cwd = resolveTarget(args.path);
++    const target = fs.existsSync(cwd) && fs.statSync(cwd).isDirectory()
++      ? cwd
++      : path.dirname(cwd);
++    const targetArg =
++      fs.existsSync(cwd) && !fs.statSync(cwd).isDirectory() ? cwd : undefined;
++    const dotnetArgs = ["test"];
++    if (targetArg) {
++      dotnetArgs.push(targetArg);
++    }
++    if (args.filter) {
++      dotnetArgs.push("--filter", args.filter);
++    }
++    if (args.noBuild) {
++      dotnetArgs.push("--no-build");
++    }
++    dotnetArgs.push("--nologo");
++    return await runDotnet(target, dotnetArgs);
++  },
++};
++
++export const dotnetFormatCheckTool: Tool = {
++  name: "DotnetFormatCheck",
++  displayName: "Dotnet Format Check",
++  description:
++    "Check formatting with dotnet format --verify-no-changes",
++  parameters: {
++    type: "object",
++    properties: {
++      path: {
++        type: "string",
++        description: "Optional project, solution or workspace path",
++      },
++      noRestore: {
++        type: "boolean",
++        description: "Add --no-restore",
++      },
++    },
++  },
++  readonly: true,
++  isBuiltIn: true,
++  run: async (args: { path?: string; noRestore?: boolean }) => {
++    const cwd = resolveTarget(args.path);
++    const target = fs.existsSync(cwd) && fs.statSync(cwd).isDirectory()
++      ? cwd
++      : path.dirname(cwd);
++    const targetArg =
++      fs.existsSync(cwd) && !fs.statSync(cwd).isDirectory() ? cwd : undefined;
++    const dotnetArgs = ["format"];
++    if (targetArg) {
++      dotnetArgs.push(targetArg);
++    }
++    dotnetArgs.push("--verify-no-changes");
++    if (args.noRestore) {
++      dotnetArgs.push("--no-restore");
++    }
++    return await runDotnet(target, dotnetArgs);
++  },
++};
+diff --git a/extensions/cli/src/tools/edit.ts b/extensions/cli/src/tools/edit.ts
+index 30aaacb86..99e3087bf 100644
+--- a/extensions/cli/src/tools/edit.ts
++++ b/extensions/cli/src/tools/edit.ts
+@@ -13,7 +13,11 @@ import {
+ } from "../telemetry/utils.js";
+ 
+ import { EditOperation } from "./multiEdit.js";
+-import { readFilesSet, readFileTool } from "./readFile.js";
++import {
++  isTextVisibleForEdit,
++  readFilesSet,
++  readFileTool,
++} from "./readFile.js";
+ import { Tool } from "./types.js";
+ import { generateDiff } from "./writeFile.js";
+ 
+@@ -107,6 +111,12 @@ WARNINGS:
+     const { old_string, new_string, replace_all } = args as EditArgs;
+ 
+     const { resolvedPath } = validateAndResolveFilePath(args);
++    if (!isTextVisibleForEdit(resolvedPath, old_string)) {
++      throw new ContinueError(
++        ContinueErrorReason.EditToolFileNotRead,
++        `The exact text to replace has not been read. Use Read or ReadRange to read the containing lines before editing ${args.file_path}.`,
++      );
++    }
+ 
+     const { oldString, newString, replaceAll } = validateSingleEdit(
+       old_string,
+diff --git a/extensions/cli/src/tools/gitTools.ts b/extensions/cli/src/tools/gitTools.ts
+new file mode 100644
+index 000000000..e56e0e414
+--- /dev/null
++++ b/extensions/cli/src/tools/gitTools.ts
+@@ -0,0 +1,98 @@
++import { execFile } from "node:child_process";
++import fs from "node:fs";
++import path from "node:path";
++import { promisify } from "node:util";
++
++import { Tool } from "./types.js";
++
++const execFileAsync = promisify(execFile);
++
++function resolveRepoPath(input?: string): string {
++  return input ? path.resolve(input) : process.cwd();
++}
++
++async function runGit(repoPath: string, args: string[]): Promise<string> {
++  if (!fs.existsSync(repoPath) || !fs.statSync(repoPath).isDirectory()) {
++    return `Error: path does not exist or is not a directory: ${repoPath}`;
++  }
++  try {
++    const { stdout, stderr } = await execFileAsync("git", [
++      "-C",
++      repoPath,
++      ...args,
++    ]);
++    return [stdout.trim(), stderr.trim()].filter(Boolean).join("\n");
++  } catch (error) {
++    return `Git error: ${error instanceof Error ? error.message : String(error)}`;
++  }
++}
++
++export const gitStatusTool: Tool = {
++  name: "GitStatus",
++  displayName: "Git Status",
++  description: "Show the current git branch and working tree status",
++  parameters: {
++    type: "object",
++    properties: {
++      path: { type: "string", description: "Optional repository path" },
++    },
++  },
++  readonly: true,
++  isBuiltIn: true,
++  run: async (args: { path?: string }) =>
++    await runGit(resolveRepoPath(args.path), ["status", "--short", "--branch"]),
++};
++
++export const gitDiffTool: Tool = {
++  name: "GitDiff",
++  displayName: "Git Diff",
++  description: "Show uncommitted changes or a diff summary",
++  parameters: {
++    type: "object",
++    properties: {
++      path: { type: "string", description: "Optional repository path" },
++      statOnly: {
++        type: "boolean",
++        description: "Show only file-level change statistics",
++      },
++    },
++  },
++  readonly: true,
++  isBuiltIn: true,
++  run: async (args: { path?: string; statOnly?: boolean }) => {
++    const repoPath = resolveRepoPath(args.path);
++    if (args.statOnly) {
++      return await runGit(repoPath, ["diff", "--stat"]);
++    }
++    const stat = await runGit(repoPath, ["diff", "--stat"]);
++    const full = await runGit(repoPath, ["diff"]);
++    return [stat, full].filter((value) => value && !value.startsWith("Git error")).join("\n\n");
++  },
++};
++
++export const gitLogTool: Tool = {
++  name: "GitLog",
++  displayName: "Git Log",
++  description: "Show recent git commits",
++  parameters: {
++    type: "object",
++    properties: {
++      path: { type: "string", description: "Optional repository path" },
++      limit: { type: "number", description: "Maximum commits (default 10)" },
++    },
++  },
++  readonly: true,
++  isBuiltIn: true,
++  run: async (args: { path?: string; limit?: number }) => {
++    const limit =
++      Number.isInteger(args.limit) && (args.limit ?? 0) > 0
++        ? Math.min(args.limit ?? 10, 100)
++        : 10;
++    return await runGit(resolveRepoPath(args.path), [
++      "log",
++      `-${limit}`,
++      "--date=short",
++      "--pretty=format:%h %ad %s",
++    ]);
++  },
++};
+diff --git a/extensions/cli/src/tools/globFiles.ts b/extensions/cli/src/tools/globFiles.ts
+new file mode 100644
+index 000000000..90db4b577
+--- /dev/null
++++ b/extensions/cli/src/tools/globFiles.ts
+@@ -0,0 +1,73 @@
++import path from "path";
++import { glob } from "glob";
++
++import { Tool } from "./types.js";
++
++export const globFilesTool: Tool = {
++  name: "Glob",
++  displayName: "Glob",
++  description:
++    "Find files recursively using a glob pattern without depending on ripgrep.",
++  parameters: {
++    type: "object",
++    required: ["pattern"],
++    properties: {
++      pattern: {
++        type: "string",
++        description:
++          "Glob pattern such as '**/*.ts', 'src/**/*.cs' or '**/package.json'",
++      },
++      path: {
++        type: "string",
++        description: "Directory to search from (defaults to current directory)",
++      },
++      limit: {
++        type: "number",
++        description: "Maximum number of files (defaults to 100)",
++      },
++    },
++  },
++  readonly: true,
++  isBuiltIn: true,
++  preprocess: async (args) => ({
++    args,
++    preview: [
++      {
++        type: "text",
++        content: `Will find files matching ${String(args.pattern ?? "")}`,
++      },
++    ],
++  }),
++  run: async (args: {
++    pattern: string;
++    path?: string;
++    limit?: number;
++  }): Promise<string> => {
++    const cwd = args.path ? path.resolve(args.path) : process.cwd();
++    const limit =
++      Number.isInteger(args.limit) && (args.limit ?? 0) > 0
++        ? Math.min(args.limit ?? 100, 500)
++        : 100;
++    const matches = await glob(args.pattern, {
++      cwd,
++      absolute: false,
++      nodir: true,
++      dot: false,
++      ignore: [
++        "**/node_modules/**",
++        "**/.git/**",
++        "**/dist/**",
++        "**/build/**",
++        "**/coverage/**",
++      ],
++    });
++    const limited = matches.slice(0, limit);
++    const suffix =
++      matches.length > limit
++        ? `\n\n[Results truncated: ${limited.length} of ${matches.length} files]`
++        : "";
++    return limited.length > 0
++      ? `Files matching "${args.pattern}" in ${cwd}:\n${limited.join("\n")}${suffix}`
++      : `No files matching "${args.pattern}" found in ${cwd}.`;
++  },
++};
+diff --git a/extensions/cli/src/tools/index.tsx b/extensions/cli/src/tools/index.tsx
+index ff87aae19..d3e169770 100644
+--- a/extensions/cli/src/tools/index.tsx
++++ b/extensions/cli/src/tools/index.tsx
+@@ -23,9 +23,19 @@ import { checkBackgroundJobTool } from "./checkBackgroundJob.js";
+ import { editTool } from "./edit.js";
+ import { exitTool } from "./exit.js";
+ import { fetchTool } from "./fetch.js";
++import {
++  dotnetBuildTool,
++  dotnetFormatCheckTool,
++  dotnetProjectsTool,
++  dotnetTestTool,
++} from "./dotnetTools.js";
++import { globFilesTool } from "./globFiles.js";
++import { gitDiffTool, gitLogTool, gitStatusTool } from "./gitTools.js";
+ import { listFilesTool } from "./listFiles.js";
+ import { multiEditTool } from "./multiEdit.js";
+ import { readFileTool } from "./readFile.js";
++import { readFileRangeTool } from "./readFileRange.js";
++import { readManyFilesTool } from "./readManyFiles.js";
+ import { reportFailureTool } from "./reportFailure.js";
+ import { runTerminalCommandTool } from "./runTerminalCommand.js";
+ import { checkIfRipgrepIsInstalled, searchCodeTool } from "./searchCode.js";
+@@ -46,6 +56,7 @@ import {
+ import { uploadArtifactTool } from "./uploadArtifact.js";
+ import { writeChecklistTool } from "./writeChecklist.js";
+ import { writeFileTool } from "./writeFile.js";
++import { viewDiffTool } from "./viewDiff.js";
+ 
+ export type { Tool, ToolCall, ToolParametersSchema };
+ 
+@@ -64,10 +75,21 @@ function getAgentIdFromArgs(): string | undefined {
+ // Base tools that are always available
+ const BASE_BUILTIN_TOOLS: Tool[] = [
+   readFileTool,
++  readFileRangeTool,
+   writeFileTool,
+   listFilesTool,
+   runTerminalCommandTool,
+   fetchTool,
++  dotnetBuildTool,
++  dotnetTestTool,
++  dotnetFormatCheckTool,
++  dotnetProjectsTool,
++  globFilesTool,
++  viewDiffTool,
++  gitStatusTool,
++  gitDiffTool,
++  gitLogTool,
++  readManyFilesTool,
+   writeChecklistTool,
+   checkBackgroundJobTool,
+   askQuestionTool,
+diff --git a/extensions/cli/src/tools/multiEdit.ts b/extensions/cli/src/tools/multiEdit.ts
+index 983687c94..d26b44404 100644
+--- a/extensions/cli/src/tools/multiEdit.ts
++++ b/extensions/cli/src/tools/multiEdit.ts
+@@ -11,7 +11,10 @@ import {
+ } from "../telemetry/utils.js";
+ 
+ import { editTool, validateAndResolveFilePath } from "./edit.js";
+-import { readFileTool } from "./readFile.js";
++import {
++  isTextVisibleForEdit,
++  readFileTool,
++} from "./readFile.js";
+ import { Tool } from "./types.js";
+ import { generateDiff } from "./writeFile.js";
+ 
+@@ -106,6 +109,14 @@ WARNINGS:
+     const { resolvedPath } = validateAndResolveFilePath(args);
+ 
+     const { edits } = validateMultiEdit(args);
++    for (const edit of edits as EditOperation[]) {
++      if (!isTextVisibleForEdit(resolvedPath, edit.old_string)) {
++        throw new ContinueError(
++          ContinueErrorReason.EditToolFileNotRead,
++          `An old_string in this edit has not been read. Use Read or ReadRange to read the containing lines before editing ${args.file_path}.`,
++        );
++      }
++    }
+ 
+     const currentContent = fs.readFileSync(resolvedPath, "utf-8");
+     const newContent = executeMultiFindAndReplace(currentContent, edits);
+diff --git a/extensions/cli/src/tools/readFile.ts b/extensions/cli/src/tools/readFile.ts
+index 961b375b3..8400c7a74 100644
+--- a/extensions/cli/src/tools/readFile.ts
++++ b/extensions/cli/src/tools/readFile.ts
+@@ -28,10 +28,52 @@ function getReadFileMaxLines(): number {
+ 
+ // Track files that have been read in the current session
+ export const readFilesSet = new Set<string>();
++export const readFileRanges = new Map<
++  string,
++  Array<{ startLine: number; endLine: number; content: string }>
++>();
++
+ export function markFileAsRead(filePath: string) {
+   readFilesSet.add(filePath);
+ }
+ 
++export function markFileRangeAsRead(
++  filePath: string,
++  startLine: number,
++  endLine: number,
++  content: string,
++) {
++  const ranges = readFileRanges.get(filePath) ?? [];
++  ranges.push({ startLine, endLine, content });
++  readFileRanges.set(filePath, ranges.slice(-20));
++}
++
++export function isTextVisibleForEdit(
++  filePath: string,
++  text: string,
++): boolean {
++  if (fs.existsSync(filePath) && fs.statSync(filePath).isFile()) {
++    if (!text) {
++      return true;
++    }
++    const currentContent = fs.readFileSync(filePath, "utf-8");
++    if (!currentContent.includes(text)) {
++      return false;
++    }
++  } else {
++    return false;
++  }
++  if (!text) {
++    return readFilesSet.has(filePath) || (readFileRanges.get(filePath)?.length ?? 0) > 0;
++  }
++  if (readFilesSet.has(filePath)) {
++    return true;
++  }
++  return (readFileRanges.get(filePath) ?? []).some((range) =>
++    range.content.includes(text),
++  );
++}
++
+ export const readFileTool: Tool = {
+   name: "Read",
+   displayName: "Read",
+diff --git a/extensions/cli/src/tools/readFileRange.ts b/extensions/cli/src/tools/readFileRange.ts
+new file mode 100644
+index 000000000..a1b72fbb7
+--- /dev/null
++++ b/extensions/cli/src/tools/readFileRange.ts
+@@ -0,0 +1,137 @@
++import * as fs from "fs";
++import path from "path";
++
++import { ContinueError, ContinueErrorReason } from "core/util/errors.js";
++
++import { parseEnvNumber, truncateByLinesAndChars } from "../util/truncateOutput.js";
++import { formatToolArgument } from "./formatters.js";
++import { markFileRangeAsRead } from "./readFile.js";
++import { Tool } from "./types.js";
++
++const DEFAULT_RANGE_MAX_CHARS = 100000;
++const DEFAULT_RANGE_MAX_LINES = 5000;
++
++function getRangeMaxChars(): number {
++  return parseEnvNumber(
++    process.env.CONTINUE_CLI_READ_RANGE_MAX_OUTPUT_CHARS,
++    DEFAULT_RANGE_MAX_CHARS,
++  );
++}
++
++function getRangeMaxLines(): number {
++  return parseEnvNumber(
++    process.env.CONTINUE_CLI_READ_RANGE_MAX_OUTPUT_LINES,
++    DEFAULT_RANGE_MAX_LINES,
++  );
++}
++
++export const readFileRangeTool: Tool = {
++  name: "ReadRange",
++  displayName: "Read Range",
++  description:
++    "Read a targeted 1-based line range from an existing file. Use this instead of Read for large files.",
++  parameters: {
++    type: "object",
++    required: ["filepath", "startLine", "endLine"],
++    properties: {
++      filepath: {
++        type: "string",
++        description: "Absolute or relative path to the file",
++      },
++      startLine: {
++        type: "number",
++        description: "First line to read, 1-based",
++      },
++      endLine: {
++        type: "number",
++        description: "Last line to read, 1-based",
++      },
++    },
++  },
++  readonly: true,
++  isBuiltIn: true,
++  preprocess: async (args) => {
++    const filepath = args?.filepath;
++    if (typeof filepath !== "string" || !filepath.trim()) {
++      throw new Error("filepath is required");
++    }
++    return {
++      args,
++      preview: [
++        {
++          type: "text",
++          content: `Will read ${formatToolArgument(filepath)} lines ${args.startLine}-${args.endLine}`,
++        },
++      ],
++    };
++  },
++  run: async (args: {
++    filepath: string;
++    startLine: number;
++    endLine: number;
++  }): Promise<string> => {
++    const startLine = Number(args.startLine);
++    const endLine = Number(args.endLine);
++    if (!Number.isInteger(startLine) || startLine < 1) {
++      throw new ContinueError(
++        ContinueErrorReason.InvalidLineNumber,
++        "startLine must be a positive integer",
++      );
++    }
++    if (!Number.isInteger(endLine) || endLine < startLine) {
++      throw new ContinueError(
++        ContinueErrorReason.InvalidLineNumber,
++        "endLine must be a positive integer greater than or equal to startLine",
++      );
++    }
++
++    let filepath = args.filepath;
++    if (filepath.startsWith("./")) {
++      filepath = filepath.slice(2);
++    }
++    const resolvedPath = path.resolve(filepath);
++    if (!fs.existsSync(resolvedPath)) {
++      throw new ContinueError(
++        ContinueErrorReason.FileNotFound,
++        `File does not exist: ${filepath}`,
++      );
++    }
++
++    const content = fs.readFileSync(resolvedPath, "utf-8");
++    const lines = content.split(/\r?\n/);
++    const actualEndLine = Math.min(endLine, lines.length);
++    if (startLine > lines.length) {
++      throw new ContinueError(
++        ContinueErrorReason.InvalidLineNumber,
++        `startLine ${startLine} is beyond the end of ${filepath} (${lines.length} lines)`,
++      );
++    }
++
++    const selected = lines
++      .slice(startLine - 1, actualEndLine)
++      .join("\n");
++    const result = truncateByLinesAndChars(
++      selected,
++      getRangeMaxLines(),
++      getRangeMaxChars(),
++      `the requested range in ${filepath}`,
++    );
++
++    markFileRangeAsRead(
++      resolvedPath,
++      startLine,
++      actualEndLine,
++      result.output,
++    );
++
++    return [
++      `Content of ${filepath} (lines ${startLine}-${actualEndLine} of ${lines.length}):`,
++      result.output,
++      actualEndLine < lines.length
++        ? `More content follows after line ${actualEndLine}.`
++        : "",
++    ]
++      .filter(Boolean)
++      .join("\n");
++  },
++};
+diff --git a/extensions/cli/src/tools/readManyFiles.ts b/extensions/cli/src/tools/readManyFiles.ts
+new file mode 100644
+index 000000000..9f96d8931
+--- /dev/null
++++ b/extensions/cli/src/tools/readManyFiles.ts
+@@ -0,0 +1,69 @@
++import * as fs from "fs";
++import path from "path";
++
++import {
++  markFileAsRead,
++  markFileRangeAsRead,
++} from "./readFile.js";
++import { Tool } from "./types.js";
++
++export const readManyFilesTool: Tool = {
++  name: "ReadManyFiles",
++  displayName: "Read Many Files",
++  description:
++    "Read multiple known files together. Prefer ReadRange for a large file.",
++  parameters: {
++    type: "object",
++    required: ["filepaths"],
++    properties: {
++      filepaths: {
++        type: "array",
++        description: "List of relative or absolute file paths",
++        items: { type: "string", description: "File path" },
++      },
++      maxCharsPerFile: {
++        type: "number",
++        description: "Optional character limit per file",
++      },
++    },
++  },
++  readonly: true,
++  isBuiltIn: true,
++  run: async (args: {
++    filepaths: string[];
++    maxCharsPerFile?: number;
++  }): Promise<string> => {
++    const filepaths = Array.isArray(args.filepaths) ? args.filepaths : [];
++    const limit =
++      Number.isInteger(args.maxCharsPerFile) &&
++      (args.maxCharsPerFile ?? 0) > 0
++        ? Math.min(args.maxCharsPerFile ?? 100000, 500000)
++        : 100000;
++    const sections: string[] = [];
++    for (const filepath of filepaths.slice(0, 20)) {
++      const resolved = path.resolve(filepath);
++      if (!fs.existsSync(resolved) || !fs.statSync(resolved).isFile()) {
++        sections.push(`## ${filepath}\n[File not found]`);
++        continue;
++      }
++      const content = fs.readFileSync(resolved, "utf-8");
++      const truncated =
++        content.length > limit
++          ? content.slice(0, limit) +
++            `\n\n[${content.length - limit} characters truncated; use ReadRange]`
++          : content;
++      if (content.length <= limit) {
++        markFileAsRead(resolved);
++      } else {
++        markFileRangeAsRead(
++          resolved,
++          1,
++          content.slice(0, limit).split(/\r?\n/).length,
++          content.slice(0, limit),
++        );
++      }
++      sections.push(`## ${filepath}\n${truncated}`);
++    }
++    return sections.join("\n\n");
++  },
++};
+diff --git a/extensions/cli/src/tools/searchCode.ts b/extensions/cli/src/tools/searchCode.ts
+index ab60b1a93..a7f2af665 100644
+--- a/extensions/cli/src/tools/searchCode.ts
++++ b/extensions/cli/src/tools/searchCode.ts
+@@ -10,6 +10,7 @@ import { parseEnvNumber } from "../util/truncateOutput.js";
+ import { Tool } from "./types.js";
+ 
+ const execPromise = util.promisify(child_process.exec);
++const execFilePromise = util.promisify(child_process.execFile);
+ 
+ async function getGitignorePatterns() {
+   const gitIgnorePath = await findUp(".gitignore");
+@@ -28,7 +29,7 @@ async function getGitignorePatterns() {
+ // procedure 1: search with ripgrep
+ export async function checkIfRipgrepIsInstalled(): Promise<boolean> {
+   try {
+-    await execPromise("rg --version");
++    await execFilePromise("rg", ["--version"]);
+     return true;
+   } catch {
+     return false;
+@@ -40,19 +41,22 @@ async function searchWithRipgrep(
+   searchPath: string,
+   filePattern?: string,
+ ) {
+-  let command = `rg --line-number --with-filename --color never "${pattern}"`;
+-
++  const args = [
++    "--line-number",
++    "--with-filename",
++    "--color",
++    "never",
++  ];
++  args.push(pattern);
+   if (filePattern) {
+-    command += ` -g "${filePattern}"`;
++    args.push("-g", filePattern);
+   }
+-
+   const ignorePatterns = await getGitignorePatterns();
+   for (const ignorePattern of ignorePatterns) {
+-    command += ` -g "!${ignorePattern}"`;
++    args.push("-g", `!${ignorePattern}`);
+   }
+-
+-  command += ` "${searchPath}"`;
+-  const { stdout, stderr } = await execPromise(command);
++  args.push(searchPath);
++  const { stdout, stderr } = await execFilePromise("rg", args);
+   return { stdout, stderr };
+ }
+ 
+@@ -64,22 +68,31 @@ async function searchWithGrepOrFindstr(
+ ) {
+   const isWindows = process.platform === "win32";
+   const ignorePatterns = await getGitignorePatterns();
+-  let command: string;
+   if (isWindows) {
+     const fileSpec = filePattern ? filePattern : "*";
+-    command = `findstr /S /N /P /R "${pattern}" "${fileSpec}"`; // findstr does not support ignoring patterns
++    const { stdout, stderr } = await execFilePromise("findstr", [
++      "/S",
++      "/N",
++      "/P",
++      "/R",
++      pattern,
++      fileSpec,
++    ], { cwd: searchPath });
++    return { stdout, stderr };
+   } else {
+-    let excludeArgs = "";
++    const args = ["-R", "-n", "-H", "-I"];
+     for (const ignorePattern of ignorePatterns) {
+-      excludeArgs += ` --exclude="${ignorePattern}" --exclude-dir="${ignorePattern}"`; // use both exclude and exclude-dir because ignorePattern can be a file or directory
++      args.push(`--exclude=${ignorePattern}`, `--exclude-dir=${ignorePattern}`);
+     }
+     if (filePattern) {
+-      command = `find . -type f -path "${filePattern}" -print0 | xargs -0 grep -nH -I${excludeArgs} "${pattern}"`;
+-    } else {
+-      command = `grep -R -n -H -I${excludeArgs} "${pattern}" .`;
++      args.push("--include", filePattern);
+     }
++    args.push(pattern, ".");
++    const { stdout, stderr } = await execFilePromise("grep", args, {
++      cwd: searchPath,
++    });
++    return { stdout, stderr };
+   }
+-  return await execPromise(command, { cwd: searchPath });
+ }
+ 
+ // Output truncation defaults
+diff --git a/extensions/cli/src/tools/textToolMode.test.ts b/extensions/cli/src/tools/textToolMode.test.ts
+index fb55aaee8..cb1d688fd 100644
+--- a/extensions/cli/src/tools/textToolMode.test.ts
++++ b/extensions/cli/src/tools/textToolMode.test.ts
+@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
+ import {
+   buildTextToolsInstructions,
+   extractToolCallsFromText,
++  looksLikeToolAnnouncement,
+ } from "./textToolMode.js";
+ 
+ const allowed = new Set(["read_file", "run_terminal_command", "fetch"]);
+@@ -136,6 +137,30 @@ not json at all
+ 
+     expect(toolCalls).toHaveLength(0);
+   });
++
++  it("parses the system-tool codeblock TOOL_NAME format", () => {
++    const content = `\`\`\`tool
++TOOL_NAME: read_file
++BEGIN_ARG: filepath
++src/index.cs
++END_ARG
++\`\`\``;
++    const { toolCalls, hasToolCalls } = extractToolCallsFromText(
++      content,
++      allowed,
++    );
++    expect(hasToolCalls).toBe(true);
++    expect(toolCalls).toHaveLength(1);
++    expect(toolCalls[0].name).toBe("read_file");
++    expect(toolCalls[0].arguments).toEqual({ filepath: "src/index.cs" });
++  });
++
++  it("detects an announcement that omitted the tool block", () => {
++    expect(
++      looksLikeToolAnnouncement("I will read the file and inspect its contents."),
++    ).toBe(true);
++    expect(looksLikeToolAnnouncement("The answer is 42.")).toBe(false);
++  });
+ });
+ 
+ describe("buildTextToolsInstructions", () => {
+diff --git a/extensions/cli/src/tools/textToolMode.ts b/extensions/cli/src/tools/textToolMode.ts
+index cbae26c1d..e64eacc63 100644
+--- a/extensions/cli/src/tools/textToolMode.ts
++++ b/extensions/cli/src/tools/textToolMode.ts
+@@ -8,6 +8,7 @@
+  */
+ 
+ import {
++  resolveToolName,
+   sanitizeToolName,
+   tryParseToolArguments,
+ } from "core/tools/toolCallSanitization.js";
+@@ -95,6 +96,12 @@ Rules:
+ - Exactly one JSON object per code block, with "name" (string) and "arguments" (object).
+ - Multiple tool calls: write several code blocks; they run in the order written.
+ - Do not wrap tool calls in any other text structure; do not put them inside other code blocks.
++- Execute the tool call immediately: do not first write "I will read", "I will search",
++  "I will analyze", or similar narration.
++- Do not describe a planned tool call and then call the tool. Use prose only for
++  clarification, results, or the final answer.
++- Do not repeat the same call with the same arguments unless new information may change
++  the result.
+ - After each call you will receive the result and can continue.
+ - If you do not need a tool, simply answer normally without any "${TEXT_TOOL_FENCE}" block.
+ 
+@@ -116,6 +123,33 @@ export function extractToolCallsFromText(
+   allowedToolNames: Set<string>,
+ ): { toolCalls: ToolCall[]; hasToolCalls: boolean } {
+   const toolCalls: ToolCall[] = [];
++  const seen = new Set<string>();
++  const allowedNames = Array.from(allowedToolNames);
++
++  const addToolCall = (
++    rawName: string,
++    rawArguments: Record<string, any>,
++  ) => {
++    const name =
++      resolveToolName(rawName, allowedNames) ??
++      (allowedToolNames.has(rawName) ? rawName : undefined);
++    if (!name) {
++      return;
++    }
++    const signature = JSON.stringify([name, rawArguments]);
++    if (seen.has(signature)) {
++      return;
++    }
++    seen.add(signature);
++    toolCalls.push({
++      id: `text_tool_call_${toolCalls.length}`,
++      name,
++      arguments: rawArguments,
++      argumentsStr: JSON.stringify(rawArguments),
++      startNotified: false,
++    });
++  };
++
+   const fenceRegex = /```([^\n`]*)\n([\s\S]*?)```/g;
+ 
+   let match: RegExpExecArray | null;
+@@ -126,6 +160,29 @@ export function extractToolCallsFromText(
+       continue;
+     }
+ 
++    if (info === "tool" && /(?:tool_name|tool_name:|TOOL_NAME)/i.test(body)) {
++      const nameMatch =
++        body.match(/(?:TOOL_NAME|tool_name)\s*:?\s*\n?\s*([^\n]+)/i);
++      if (nameMatch?.[1]) {
++        const name = nameMatch[1].trim();
++        const args: Record<string, any> = {};
++        const argRegex =
++          /BEGIN_ARG:\s*([^\n]+)\n([\s\S]*?)\nEND_ARG/gi;
++        let argMatch: RegExpExecArray | null;
++        while ((argMatch = argRegex.exec(body)) !== null) {
++          const key = argMatch[1].trim();
++          const value = argMatch[2].trim();
++          try {
++            args[key] = JSON.parse(value);
++          } catch {
++            args[key] = value;
++          }
++        }
++        addToolCall(name, args);
++      }
++      continue;
++    }
++
+     let parsed: any;
+     try {
+       parsed = JSON.parse(body);
+@@ -134,12 +191,16 @@ export function extractToolCallsFromText(
+     }
+ 
+     const name =
+-      typeof parsed?.name === "string" ? (parsed.name as string) : undefined;
+-    if (!name || !allowedToolNames.has(name)) {
++      typeof parsed?.name === "string"
++        ? parsed.name
++        : typeof parsed?.tool_name === "string"
++          ? parsed.tool_name
++          : undefined;
++    if (!name) {
+       continue;
+     }
+ 
+-    let args = parsed?.arguments;
++    let args = parsed?.arguments ?? parsed?.args;
+     if (typeof args === "string") {
+       try {
+         args = JSON.parse(args);
+@@ -153,14 +214,7 @@ export function extractToolCallsFromText(
+     if (typeof args !== "object" || Array.isArray(args)) {
+       continue;
+     }
+-
+-    toolCalls.push({
+-      id: `text_tool_call_${toolCalls.length}`,
+-      name,
+-      arguments: args,
+-      argumentsStr: JSON.stringify(args),
+-      startNotified: false,
+-    });
++    addToolCall(name, args);
+   }
+ 
+   // Fallback for models that ignore the fence instruction and emit their
+@@ -169,19 +223,26 @@ export function extractToolCallsFromText(
+   for (const match of content.matchAll(xmlToolCallRegex)) {
+     const body = (match[1] ?? "").trim();
+     const name = sanitizeToolName(body);
+-    if (!name || !allowedToolNames.has(name)) {
++    if (!name) {
+       continue;
+     }
+ 
+     const args = tryParseToolArguments(body) ?? {};
+-    toolCalls.push({
+-      id: `text_tool_call_${toolCalls.length}`,
+-      name,
+-      arguments: args,
+-      argumentsStr: JSON.stringify(args),
+-      startNotified: false,
+-    });
++    addToolCall(name, args);
+   }
+ 
+   return { toolCalls, hasToolCalls: toolCalls.length > 0 };
+ }
++
++export function looksLikeToolAnnouncement(content: string): boolean {
++  const text = content.trim();
++  if (!text) {
++    return false;
++  }
++  const lower = text.toLowerCase();
++  const announcements =
++    /\b(i(?:'|’)ll|i will|i'm going to|i am going to|let me|i need to|i should|i have to|next i(?:'|’)ll|je vais|je dois|je vais devoir|j'utilise|je vais utiliser)\b/i;
++  const actionWords =
++    /\b(read|search|inspect|analyze|analyse|edit|modify|run|grep|glob|list|check|fetch|open)\w*\b/i;
++  return announcements.test(lower) || (actionWords.test(lower) && lower.length < 600);
++}
+diff --git a/extensions/cli/src/ui/DirectorySearchUI.tsx b/extensions/cli/src/ui/DirectorySearchUI.tsx
+new file mode 100644
+index 000000000..1be291f8f
+--- /dev/null
++++ b/extensions/cli/src/ui/DirectorySearchUI.tsx
+@@ -0,0 +1,55 @@
++import { Box, Text } from "ink";
++import React, { useEffect, useState } from "react";
++
++import { getDirectorySuggestions } from "../util/workspace.js";
++
++interface DirectorySearchUIProps {
++  filter: string;
++  selectedIndex: number;
++  onSelect: (directory: string) => void;
++  onDirectoriesUpdated?: (directories: string[]) => void;
++}
++
++export const DirectorySearchUI: React.FC<DirectorySearchUIProps> = ({
++  filter,
++  selectedIndex,
++  onDirectoriesUpdated,
++}) => {
++  const [directories, setDirectories] = useState<string[]>([]);
++
++  useEffect(() => {
++    const suggestions = getDirectorySuggestions(filter, 12);
++    setDirectories(suggestions);
++    onDirectoriesUpdated?.(suggestions);
++  }, [filter, onDirectoriesUpdated]);
++
++  if (directories.length === 0) {
++    return (
++      <Box paddingX={1} marginX={1} marginBottom={1}>
++        <Text color="gray">
++          No existing folders found. Type a complete existing path.
++        </Text>
++      </Box>
++    );
++  }
++
++  return (
++    <Box paddingX={1} marginX={1} marginBottom={1} flexDirection="column">
++      {directories.map((directory, index) => (
++        <Text
++          key={directory}
++          color="green"
++          bold={index === selectedIndex}
++        >
++          {index === selectedIndex ? "› " : "  "}
++          {directory}
++        </Text>
++      ))}
++      <Box marginTop={1}>
++        <Text color="gray">
++          ↑/↓ navigate, Enter or Tab select, Escape close
++        </Text>
++      </Box>
++    </Box>
++  );
++};
+diff --git a/extensions/cli/src/ui/SlashCommandUI.tsx b/extensions/cli/src/ui/SlashCommandUI.tsx
+index ea870f870..cc9d86191 100644
+--- a/extensions/cli/src/ui/SlashCommandUI.tsx
++++ b/extensions/cli/src/ui/SlashCommandUI.tsx
+@@ -34,6 +34,11 @@ const SlashCommandUI: React.FC<SlashCommandUIProps> = ({
+     // Fallback - basic commands without assistant
+     [
+       { name: "help", description: "Show help message", category: "system" },
++      {
++        name: "cd",
++        description: "Change the current workspace folder",
++        category: "system",
++      },
+       {
+         name: "clear",
+         description: "Clear the chat history",
+diff --git a/extensions/cli/src/ui/TUIChat.tsx b/extensions/cli/src/ui/TUIChat.tsx
+index 282e58c73..924583423 100644
+--- a/extensions/cli/src/ui/TUIChat.tsx
++++ b/extensions/cli/src/ui/TUIChat.tsx
+@@ -32,7 +32,6 @@ import { useChat } from "./hooks/useChat.js";
+ import { useContextPercentage } from "./hooks/useContextPercentage.js";
+ import { useMessageRenderer } from "./hooks/useMessageRenderer.js";
+ import { useIntroMessage, useSelectors } from "./hooks/useTUIChatHooks.js";
+-import { MarkdownRenderer } from "./MarkdownRenderer.js";
+ 
+ interface TUIChatProps {
+   // Remote mode props
+@@ -424,7 +423,7 @@ const TUIChat: React.FC<TUIChatProps> = ({
+           <Box marginBottom={1} paddingLeft={0}>
+             <Text color="white">●</Text>
+             <Text> </Text>
+-            <MarkdownRenderer content={streamingContent} />
++            <Text wrap="wrap">{streamingContent}</Text>
+           </Box>
+         )}
+       </Box>
+diff --git a/extensions/cli/src/ui/UserInput.tsx b/extensions/cli/src/ui/UserInput.tsx
+index 21aafc847..6ad0bf9cd 100644
+--- a/extensions/cli/src/ui/UserInput.tsx
++++ b/extensions/cli/src/ui/UserInput.tsx
+@@ -27,6 +27,7 @@ import {
+   updateTextBufferState,
+ } from "./hooks/useUserInput.js";
+ import { SlashCommandUI } from "./SlashCommandUI.js";
++import { DirectorySearchUI } from "./DirectorySearchUI.js";
+ import { TextBuffer } from "./TextBuffer.js";
+ 
+ // Small presentational helpers to reduce cyclomatic complexity in UserInput
+@@ -161,6 +162,7 @@ const UserInput: React.FC<UserInputProps> = ({
+     setCursorPosition(0);
+     setShowSlashCommands(false);
+     setShowFileSearch(false);
++    setShowDirectorySearch(false);
+     setShowBashMode(false);
+     inputHistory.resetNavigation();
+   }, [textBuffer]);
+@@ -171,6 +173,10 @@ const UserInput: React.FC<UserInputProps> = ({
+   const [showFileSearch, setShowFileSearch] = useState(false);
+   const [fileSearchFilter, setFileSearchFilter] = useState("");
+   const [selectedFileIndex, setSelectedFileIndex] = useState(0);
++  const [showDirectorySearch, setShowDirectorySearch] = useState(false);
++  const [directorySearchFilter, setDirectorySearchFilter] = useState("");
++  const [selectedDirectoryIndex, setSelectedDirectoryIndex] = useState(0);
++  const [currentDirectories, setCurrentDirectories] = useState<string[]>([]);
+   const [currentFiles, setCurrentFiles] = useState<
+     Array<{ path: string; displayName: string }>
+   >([]);
+@@ -350,6 +356,39 @@ const UserInput: React.FC<UserInputProps> = ({
+     }
+   };
+ 
++  const updateDirectorySearchState = (text: string, cursor: number) => {
++    if (isRemoteMode) {
++      setShowDirectorySearch(false);
++      return;
++    }
++    const beforeCursor = text.slice(0, cursor).trimStart();
++    const match = beforeCursor.match(/^(?:\/)?cd(?:\s+(.*))?$/);
++    if (!match) {
++      setShowDirectorySearch(false);
++      return;
++    }
++    setShowDirectorySearch(true);
++    setDirectorySearchFilter(match[1] ?? "");
++    setSelectedDirectoryIndex(0);
++    setShowSlashCommands(false);
++    setShowFileSearch(false);
++  };
++
++  const selectDirectory = (directory: string) => {
++    const beforeCursor = inputText.slice(0, cursorPosition).trimStart();
++    const prefix = beforeCursor.startsWith("/cd")
++      ? "/cd "
++      : "cd ";
++    const afterCursor = inputText.slice(cursorPosition);
++    const newText = prefix + directory + afterCursor;
++    const newCursorPos = prefix.length + directory.length;
++    textBuffer.setText(newText);
++    textBuffer.setCursor(newCursorPos);
++    setInputText(newText);
++    setCursorPosition(newCursorPos);
++    setShowDirectorySearch(false);
++  };
++
+   // Get filtered commands for navigation - using the same sorting logic as SlashCommandUI
+   const getFilteredCommands = () => {
+     return slashCommands
+@@ -524,6 +563,31 @@ const UserInput: React.FC<UserInputProps> = ({
+     return false;
+   };
+ 
++  const handleDirectorySearchNavigation = (key: any): boolean => {
++    if (key.upArrow) {
++      setSelectedDirectoryIndex((prev) =>
++        prev > 0 ? prev - 1 : Math.max(0, currentDirectories.length - 1),
++      );
++      return true;
++    }
++    if (key.downArrow) {
++      setSelectedDirectoryIndex((prev) =>
++        prev < currentDirectories.length - 1 ? prev + 1 : 0,
++      );
++      return true;
++    }
++    if ((key.return && !key.shift) || key.tab) {
++      if (
++        currentDirectories.length > 0 &&
++        selectedDirectoryIndex < currentDirectories.length
++      ) {
++        selectDirectory(currentDirectories[selectedDirectoryIndex]);
++      }
++      return true;
++    }
++    return false;
++  };
++
+   const handleHistoryNavigation = (key: any): boolean => {
+     if (!showSlashCommands && !showFileSearch) {
+       if (key.upArrow) {
+@@ -614,6 +678,7 @@ const UserInput: React.FC<UserInputProps> = ({
+         setCursorPosition(newCursor);
+         updateSlashCommandState(newText, newCursor);
+         updateFileSearchState(newText, newCursor);
++        updateDirectorySearchState(newText, newCursor);
+       }
+       return true;
+     }
+@@ -658,6 +723,11 @@ const UserInput: React.FC<UserInputProps> = ({
+       return true;
+     }
+ 
++    if (showDirectorySearch && inputMode) {
++      setShowDirectorySearch(false);
++      return true;
++    }
++
+     // Handle double Esc to open edit message selector
+     const now = Date.now();
+     if (
+@@ -688,6 +758,7 @@ const UserInput: React.FC<UserInputProps> = ({
+     setCursorPosition(newCursor);
+     updateSlashCommandState(newText, newCursor);
+     updateFileSearchState(newText, newCursor);
++    updateDirectorySearchState(newText, newCursor);
+     updateBashModeState(newText);
+     inputHistory.resetNavigation();
+   };
+@@ -750,6 +821,12 @@ const UserInput: React.FC<UserInputProps> = ({
+       }
+     }
+ 
++    if (showDirectorySearch) {
++      if (handleDirectorySearchNavigation(key)) {
++        return;
++      }
++    }
++
+     // Handle input history navigation
+     if (handleHistoryNavigation(key)) {
+       return;
+@@ -906,6 +983,14 @@ const UserInput: React.FC<UserInputProps> = ({
+         onSelect={selectFile}
+         onFilesUpdated={setCurrentFiles}
+       />
++      {showDirectorySearch && inputMode && !hideNormalUI && !isRemoteMode && (
++        <DirectorySearchUI
++          filter={directorySearchFilter}
++          selectedIndex={selectedDirectoryIndex}
++          onSelect={selectDirectory}
++          onDirectoriesUpdated={setCurrentDirectories}
++        />
++      )}
+     </Box>
+   );
+ };
+diff --git a/extensions/cli/src/ui/hooks/useChat.helpers.ts b/extensions/cli/src/ui/hooks/useChat.helpers.ts
+index a90a4d6b4..10d1d4763 100644
+--- a/extensions/cli/src/ui/hooks/useChat.helpers.ts
++++ b/extensions/cli/src/ui/hooks/useChat.helpers.ts
+@@ -9,6 +9,8 @@ import { logger } from "src/util/logger.js";
+ import { DEFAULT_SESSION_TITLE } from "../../constants/session.js";
+ import { loadSession, startNewSession } from "../../session.js";
+ import { telemetryService } from "../../telemetry/telemetryService.js";
++import { services } from "../../services/index.js";
++import { changeWorkspace } from "../../util/workspace.js";
+ 
+ import { processImagePlaceholder } from "./useChat.imageProcessing.js";
+ import { SlashCommandResult } from "./useChat.types.js";
+@@ -339,6 +341,29 @@ export async function handleSpecialCommands({
+ }: HandleSpecialCommandsOptions): Promise<boolean> {
+   const trimmedMessage = message.trim();
+ 
++  if (
++    trimmedMessage === "cd" ||
++    trimmedMessage === "/cd" ||
++    trimmedMessage.startsWith("cd ") ||
++    trimmedMessage.startsWith("/cd ")
++  ) {
++    const input = trimmedMessage.startsWith("/cd ")
++      ? trimmedMessage.slice(4)
++      : trimmedMessage.startsWith("cd ")
++        ? trimmedMessage.slice(3)
++        : "";
++    const result = changeWorkspace(input);
++    if (result.success) {
++      try {
++        void services.fileIndex?.refreshIndex(true);
++      } catch {}
++    }
++    if (onShowStatusMessage) {
++      onShowStatusMessage(result.message);
++    }
++    return true;
++  }
++
+   // Special handling for /config command in TUI
+   if (trimmedMessage === "/config") {
+     handleConfigCommand(onShowConfigSelector);
+diff --git a/extensions/cli/src/ui/hooks/useChat.stream.helpers.ts b/extensions/cli/src/ui/hooks/useChat.stream.helpers.ts
+index 0767e226c..1f2937777 100644
+--- a/extensions/cli/src/ui/hooks/useChat.stream.helpers.ts
++++ b/extensions/cli/src/ui/hooks/useChat.stream.helpers.ts
+@@ -33,7 +33,7 @@ export function createStreamCallbacks(
+   // Live streaming: deltas are buffered and flushed at most every
+   // STREAMING_FLUSH_INTERVAL_MS so the Ink UI re-renders a handful of times
+   // per second instead of on every token.
+-  const STREAMING_FLUSH_INTERVAL_MS = 120;
++  const STREAMING_FLUSH_INTERVAL_MS = 200;
+   let streamingBuffer = "";
+   let lastStreamingFlush = 0;
+ 
+diff --git a/extensions/cli/src/ui/utils/historySplitting.test.ts b/extensions/cli/src/ui/utils/historySplitting.test.ts
+index f4f860b1c..7039d2db2 100644
+--- a/extensions/cli/src/ui/utils/historySplitting.test.ts
++++ b/extensions/cli/src/ui/utils/historySplitting.test.ts
+@@ -54,5 +54,15 @@ describe("messageHistorySplitting", () => {
+       // Last message should still be last
+       expect(result[result.length - 1].message.content).toBe("Last");
+     });
++
++    it("should keep a large code block intact instead of looping", () => {
++      const code = "```csharp\n" + "x\n".repeat(200) + "```";
++      const result = splitChatHistory(
++        [createMockChatHistoryItem(code)],
++        80,
++      );
++      expect(result).toHaveLength(1);
++      expect(result[0].message.content).toBe(code);
++    });
+   });
+ });
+diff --git a/extensions/cli/src/ui/utils/historySplitting.ts b/extensions/cli/src/ui/utils/historySplitting.ts
+index c5854746e..adca8a0b6 100644
+--- a/extensions/cli/src/ui/utils/historySplitting.ts
++++ b/extensions/cli/src/ui/utils/historySplitting.ts
+@@ -74,8 +74,9 @@ function splitContentIntoHistoryItems(
+     // Find safe split point
+     const splitPoint = findLastSafeSplitPoint(remainingContent);
+ 
+-    if (splitPoint === remainingContent.length) {
+-      // No safe split point found, add as single large item
++    if (splitPoint <= 0 || splitPoint >= remainingContent.length) {
++      // No safe split point found or the split would make no progress.
++      // Keep a large code block/paragraph intact instead of spinning.
+       if (remainingContent.trim()) {
+         items.push({
+           ...originalItem,
+diff --git a/extensions/cli/src/ui/utils/messageSplitting.ts b/extensions/cli/src/ui/utils/messageSplitting.ts
+index 73cdb26c3..9112d7d2a 100644
+--- a/extensions/cli/src/ui/utils/messageSplitting.ts
++++ b/extensions/cli/src/ui/utils/messageSplitting.ts
+@@ -98,10 +98,15 @@ export const findLastSafeSplitPoint = (content: string): number => {
+     content,
+     content.length,
+   );
+-  if (enclosingBlockStart !== -1) {
++  if (enclosingBlockStart > 0) {
+     // The end of the content is contained in a code block. Split right before.
+     return enclosingBlockStart;
+   }
++  if (enclosingBlockStart === 0) {
++    // Never return 0 for a block that starts at the beginning: it would make
++    // the chat history splitter loop without advancing.
++    return content.length;
++  }
+ 
+   // Search for the last double newline (\n\n) not in a code block.
+   let searchStartIndex = content.length;
+diff --git a/extensions/cli/src/util/workspace.ts b/extensions/cli/src/util/workspace.ts
+new file mode 100644
+index 000000000..6d1939b66
+--- /dev/null
++++ b/extensions/cli/src/util/workspace.ts
+@@ -0,0 +1,121 @@
++import fs from "node:fs";
++import os from "node:os";
++import path from "node:path";
++
++const recentDirectories = new Set<string>();
++
++function expandTilde(input: string): string {
++  if (input === "~") {
++    return os.homedir();
++  }
++  if (input.startsWith("~/") || input.startsWith("~\\")) {
++    return path.join(os.homedir(), input.slice(2));
++  }
++  return input;
++}
++
++export function resolveWorkspacePath(input: string): string {
++  const trimmed = input.trim();
++  const stripped =
++    trimmed.length >= 2 &&
++    ((trimmed.startsWith('"') && trimmed.endsWith('"')) ||
++      (trimmed.startsWith("'") && trimmed.endsWith("'")))
++      ? trimmed.slice(1, -1)
++      : trimmed;
++  const expanded = expandTilde(stripped);
++  return path.resolve(expanded);
++}
++
++export function changeWorkspace(input: string): {
++  success: boolean;
++  path?: string;
++  message: string;
++} {
++  if (!input.trim()) {
++    return {
++      success: true,
++      path: process.cwd(),
++      message: `Workspace: ${process.cwd()}`,
++    };
++  }
++  let resolved: string;
++  try {
++    resolved = resolveWorkspacePath(input);
++  } catch (error) {
++    return {
++      success: false,
++      message: `Invalid workspace path: ${error instanceof Error ? error.message : String(error)}`,
++    };
++  }
++  if (!fs.existsSync(resolved)) {
++    return {
++      success: false,
++      message: `Workspace does not exist: ${resolved}`,
++    };
++  }
++  if (!fs.statSync(resolved).isDirectory()) {
++    return {
++      success: false,
++      message: `Not a directory: ${resolved}`,
++    };
++  }
++
++  process.chdir(resolved);
++  recentDirectories.delete(resolved);
++  recentDirectories.add(resolved);
++  return {
++    success: true,
++    path: resolved,
++    message: `Workspace: ${resolved}`,
++  };
++}
++
++export function getDirectorySuggestions(
++  input: string,
++  limit: number = 12,
++): string[] {
++  const trimmed = input.trim();
++  const expanded = expandTilde(trimmed);
++  if (!expanded) {
++    return Array.from(recentDirectories)
++      .reverse()
++      .filter((entry) => fs.existsSync(entry))
++      .slice(0, limit);
++  }
++
++  const absolute = path.resolve(expanded);
++  const endsWithSeparator =
++    expanded.endsWith("/") || expanded.endsWith("\\");
++  const base = endsWithSeparator ? absolute : path.dirname(absolute);
++  const prefix = endsWithSeparator ? "" : path.basename(absolute).toLowerCase();
++  if (!fs.existsSync(base) || !fs.statSync(base).isDirectory()) {
++    return [];
++  }
++
++  let entries: fs.Dirent[];
++  try {
++    entries = fs.readdirSync(base, { withFileTypes: true });
++  } catch {
++    return [];
++  }
++  const suggestions = entries
++    .filter(
++      (entry) =>
++        entry.isDirectory() &&
++        !entry.name.startsWith(".") &&
++        entry.name.toLowerCase().startsWith(prefix),
++    )
++    .sort((a, b) => a.name.localeCompare(b.name))
++    .map((entry) => path.join(base, entry.name));
++
++  for (const recent of Array.from(recentDirectories).reverse()) {
++    if (
++      fs.existsSync(recent) &&
++      recent.toLowerCase().startsWith(absolute.toLowerCase()) &&
++      !suggestions.includes(recent)
++    ) {
++      suggestions.unshift(recent);
++    }
++  }
++  return suggestions.slice(0, limit);
++}
+diff --git a/extensions/vscode/scripts/package.js b/extensions/vscode/scripts/package.js
+index 6e3783d6c..f4af408b0 100644
+--- a/extensions/vscode/scripts/package.js
++++ b/extensions/vscode/scripts/package.js
+@@ -1,4 +1,4 @@
+-const { exec } = require("child_process");
++const { exec, execSync } = require("child_process");
+ const fs = require("fs");
+ 
+ const version = JSON.parse(
+@@ -23,6 +23,9 @@ let command = isPreRelease
+   : "npx @vscode/vsce package --out ./build --no-dependencies"; // --yarn";
+ 
+ if (target) {
++  execSync(`node scripts/prepackage.js --target ${target}`, {
++    stdio: "inherit",
++  });
+   command += ` --target ${target}`;
+ }
+ 
+diff --git a/extensions/vscode/src/VsCodeIde.ts b/extensions/vscode/src/VsCodeIde.ts
+index 64d71d017..87848dc5b 100644
+--- a/extensions/vscode/src/VsCodeIde.ts
++++ b/extensions/vscode/src/VsCodeIde.ts
+@@ -576,6 +576,22 @@ class VsCodeIde implements IDE {
+     }
+   }
+ 
++  async askQuestion(args: {
++    question: string;
++    options?: string[];
++    defaultAnswer?: string;
++  }): Promise<string | undefined> {
++    if (args.options && args.options.length > 0) {
++      return await vscode.window.showQuickPick(args.options, {
++        placeHolder: args.question,
++      });
++    }
++    return await vscode.window.showInputBox({
++      prompt: args.question,
++      value: args.defaultAnswer,
++    });
++  }
++
+   async getProblems(fileUri?: string | undefined): Promise<Problem[]> {
+     const uri = fileUri
+       ? vscode.Uri.parse(fileUri)
+diff --git a/extensions/vscode/src/extension/VsCodeMessenger.ts b/extensions/vscode/src/extension/VsCodeMessenger.ts
+index 711acd546..82ba6c9d8 100644
+--- a/extensions/vscode/src/extension/VsCodeMessenger.ts
++++ b/extensions/vscode/src/extension/VsCodeMessenger.ts
+@@ -341,6 +341,9 @@ export class VsCodeMessenger {
+     this.onWebviewOrCore("getProblems", async (msg) => {
+       return ide.getProblems(msg.data.filepath);
+     });
++    this.onWebviewOrCore("askQuestion", async (msg) => {
++      return ide.askQuestion?.(msg.data);
++    });
+     this.onWebviewOrCore("getBranch", async (msg) => {
+       const { dir } = msg.data;
+       return ide.getBranch(dir);
+diff --git a/gui/src/redux/thunks/callToolById.ts b/gui/src/redux/thunks/callToolById.ts
+index eaf6d1833..557b0b95b 100644
+--- a/gui/src/redux/thunks/callToolById.ts
++++ b/gui/src/redux/thunks/callToolById.ts
+@@ -1,7 +1,10 @@
+ import { createAsyncThunk, unwrapResult } from "@reduxjs/toolkit";
+ import { ContextItem, McpUiState } from "core";
+ import { CLIENT_TOOLS_IMPLS } from "core/tools/builtIn";
+-import { resolveToolName } from "core/tools/toolCallSanitization";
++import {
++  resolveToolName,
++  tryParseToolArguments,
++} from "core/tools/toolCallSanitization";
+ import { ContinueError, ContinueErrorReason } from "core/util/errors";
+ 
+ import { callClientTool } from "../../util/clientTools/callClientTool";
+@@ -35,6 +38,48 @@ export const callToolById = createAsyncThunk<
+     return;
+   }
+ 
++  const repeatedSignature = JSON.stringify({
++    name: toolCallState.toolCall.function.name,
++    arguments: toolCallState.parsedArgs ?? {},
++  });
++  let repeatedCount = 0;
++  for (const item of state.session.history) {
++    if (item.message.role !== "assistant" || !item.message.toolCalls) {
++      continue;
++    }
++    for (const toolCall of item.message.toolCalls) {
++      if (!toolCall.function) {
++        continue;
++      }
++      const signature = JSON.stringify({
++        name: toolCall.function.name,
++        arguments: tryParseToolArguments(toolCall.function.arguments) ?? {},
++      });
++      if (signature === repeatedSignature) {
++        repeatedCount++;
++      }
++    }
++  }
++  if (repeatedCount >= 3) {
++    dispatch(
++      errorToolCall({
++        toolCallId,
++        output: [
++          {
++            icon: "problems",
++            name: "Repeated tool call stopped",
++            description: "No progress",
++            content:
++              "The same tool call was repeated 3 times without a new result. Stop and provide a summary or ask for clarification.",
++            hidden: false,
++          },
++        ],
++      }),
++    );
++    dispatch(setInactive());
++    return;
++  }
++
+   const selectedChatModel = selectSelectedChatModel(state);
+ 
+   if (!selectedChatModel) {
+diff --git a/gui/src/redux/thunks/streamNormalInput.ts b/gui/src/redux/thunks/streamNormalInput.ts
+index 67a663a0d..acd74b6b7 100644
+--- a/gui/src/redux/thunks/streamNormalInput.ts
++++ b/gui/src/redux/thunks/streamNormalInput.ts
+@@ -25,7 +25,10 @@ import { modelSupportsNativeTools } from "core/llm/toolSupport";
+ import { applyToolOverrides } from "core/tools/applyToolOverrides";
+ import { addSystemMessageToolsToSystemMessage } from "core/tools/systemMessageTools/buildToolsSystemMessage";
+ import { interceptSystemToolCalls } from "core/tools/systemMessageTools/interceptSystemToolCalls";
+-import { SystemMessageToolCodeblocksFramework } from "core/tools/systemMessageTools/toolCodeblocks";
++import {
++  looksLikeToolAnnouncement,
++  SystemMessageToolCodeblocksFramework,
++} from "core/tools/systemMessageTools/toolCodeblocks";
+ 
+ import {
+   selectCurrentToolCalls,
+@@ -82,8 +85,12 @@ export const streamNormalInput = createAsyncThunk<
+     { legacySlashCommandData, depth = 0 },
+     { dispatch, extra, getState },
+   ) => {
+-    if (process.env.NODE_ENV === "test" && depth > 50) {
+-      const message = `Max stream depth of ${50} reached in test`;
++    const maxAgentTurns =
++      getState().config.config.experimental?.maxAgentTurns ?? 25;
++    if (depth > maxAgentTurns) {
++      const message =
++        `Stopped after ${maxAgentTurns} agent tool turns. ` +
++        `Break the remaining work into smaller steps and continue.`;
+       console.error(message, JSON.stringify(getState(), null, 2));
+       throw new Error(message);
+     }
+@@ -318,6 +325,35 @@ export const streamNormalInput = createAsyncThunk<
+       return;
+     }
+     const originalToolCalls = selectCurrentToolCalls(state1);
++    if (
++      systemToolsFramework &&
++      activeTools.length > 0 &&
++      originalToolCalls.length === 0
++    ) {
++      const lastAssistant = state1.session.history.findLast(
++        (item) => item.message.role === "assistant",
++      );
++      const assistantText =
++        typeof lastAssistant?.message.content === "string"
++          ? lastAssistant.message.content
++          : JSON.stringify(lastAssistant?.message.content ?? "");
++      if (looksLikeToolAnnouncement(assistantText)) {
++        dispatch(
++          streamUpdate([
++            {
++              role: "user",
++              content:
++                "Do not announce the next action. Execute the required available tool now. " +
++                "Return only the tool code block; do not add prose before or after.",
++            },
++          ]),
++        );
++        unwrapResult(
++          await dispatch(streamNormalInput({ depth: depth + 1 })),
++        );
++        return;
++      }
++    }
+     const generatingCalls = originalToolCalls.filter(
+       (tc) => tc.status === "generating",
+     );
+-- 
+2.53.0
+
