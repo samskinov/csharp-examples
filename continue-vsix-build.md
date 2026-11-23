@@ -16,7 +16,7 @@ d'entreprise.
 | 4 | `04-continue-cli-tools.patch` | 6 commits : chat sans tools natifs, system message unique, `/tool-mode`, tool calls XML, fallback texte, VSIX ciblé |
 | 5 | `05-continue-vscode-activation.patch` | 1 commit : logs d'activation, `system-ca` dynamique, binding `win-ca` |
 | 6 | `06-continue-agent-performance.patch` | 1 commit : outils agent, boucles et streaming texte |
-| 7 | `07-continue-text-tools.patch` | 1 commit : mode texte fiable OpenAI-compatible, aucun `tools`/`tool_calls` natif, schémas/exemples, réparation/validation des arguments, alias CLI↔GUI, rappel syntaxe+exemple dans les erreurs, `/cd` persistant et restauré au resume/fork, ChangeDirectory, MCP prêt avant la première requête, fenêtre d’historique GUI sans nouvelle dépendance |
+| 7 | `07-continue-text-tools.patch` | 1 commit : mode texte fiable OpenAI-compatible, aucun `tools`/`tool_calls` natif, schémas/exemples, réparation/validation des arguments, alias CLI↔GUI, rappel syntaxe+exemple dans les erreurs, `/cd` persistant et restauré au resume/fork, ChangeDirectory, MCP prêt avant la première requête, virtualisation maison de l’historique GUI sans nouvelle dépendance |
 
 ⚠️ Empilement vérifié : `git am` 14+4+1+6+1+1+1 = **28 commits** sur
 `refs/heads/main` propre.

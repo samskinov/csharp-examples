@@ -1,4 +1,4 @@
-From bdba37dbffdcca2b8ffc84eed415a9e1ce3a1736 Mon Sep 17 00:00:00 2001
+From 0dbf3df9376fd60121c125c5fb2df4ea9519a98b Mon Sep 17 00:00:00 2001
 From: Sam <sam@example.com>
 Date: Mon, 23 Nov 2026 20:11:56 +0100
 Subject: [PATCH] fix(tools): make text mode reliable for OpenAI-compatible
@@ -17,7 +17,7 @@ Also align CLI and VS Code tool names/arguments (Write/create_new_file, Edit/sin
  .../toolCodeblocks/index.ts                   |   5 +-
  core/tools/toolArgumentValidation.ts          | 187 ++++++++++
  core/tools/toolArgumentValidation.vitest.ts   |  87 +++++
- core/tools/toolCallSanitization.ts            | 172 ++++++++-
+ core/tools/toolCallSanitization.ts            | 182 +++++++++-
  core/tools/toolCallSanitization.vitest.ts     |  17 +-
  core/util/messageConversion.ts                |  57 +++
  extensions/cli/src/commands/chat.ts           |   7 +
@@ -29,7 +29,7 @@ Also align CLI and VS Code tool names/arguments (Write/create_new_file, Edit/sin
  extensions/cli/src/stream/handleToolCalls.ts  |   9 +
  .../src/stream/streamChatResponse.helpers.ts  |  38 +-
  .../cli/src/stream/streamChatResponse.ts      |   1 +
- extensions/cli/src/stream/streamResilience.ts |  40 ++-
+ extensions/cli/src/stream/streamResilience.ts |  40 +-
  extensions/cli/src/systemMessage.ts           |   4 +
  extensions/cli/src/tools/allBuiltIns.ts       |   2 +
  extensions/cli/src/tools/applyPatch.ts        |  15 +-
@@ -42,9 +42,9 @@ Also align CLI and VS Code tool names/arguments (Write/create_new_file, Edit/sin
  extensions/cli/src/tools/readFile.ts          |  21 +-
  .../cli/src/tools/runTerminalCommand.ts       |   4 +-
  extensions/cli/src/tools/searchCode.test.ts   |   2 +-
- extensions/cli/src/tools/searchCode.ts        |  60 ++--
+ extensions/cli/src/tools/searchCode.ts        |  60 +--
  extensions/cli/src/tools/textToolMode.test.ts |   7 +-
- extensions/cli/src/tools/textToolMode.ts      | 337 ++++++++++++++----
+ extensions/cli/src/tools/textToolMode.ts      | 337 +++++++++++++----
  extensions/cli/src/tools/types.ts             |   1 +
  extensions/cli/src/tools/validateToolArgs.ts  | 137 +++++++
  extensions/cli/src/ui/TUIChat.tsx             |   5 +
@@ -54,19 +54,21 @@ Also align CLI and VS Code tool names/arguments (Write/create_new_file, Edit/sin
  .../cli/src/ui/hooks/useChat.helpers.ts       |  12 +-
  extensions/cli/src/util/workspace.test.ts     |  42 +++
  extensions/cli/src/util/workspace.ts          |  43 ++-
- gui/src/pages/gui/Chat.tsx                    |  51 ++-
+ gui/src/pages/gui/Chat.tsx                    |  55 +--
+ gui/src/pages/gui/VirtualizedHistory.tsx      | 342 ++++++++++++++++++
  gui/src/redux/slices/sessionSlice.ts          |   5 +-
  gui/src/redux/thunks/callToolById.ts          |   3 +-
  .../redux/thunks/preprocessToolCallArgs.ts    |  19 +-
  gui/src/redux/thunks/streamNormalInput.ts     |  27 +-
  gui/src/redux/thunks/streamThunkWrapper.tsx   |   9 +
  gui/src/util/clientTools/callClientTool.ts    |   8 +-
- 53 files changed, 1504 insertions(+), 268 deletions(-)
+ 54 files changed, 1840 insertions(+), 288 deletions(-)
  create mode 100644 core/tools/toolArgumentValidation.ts
  create mode 100644 core/tools/toolArgumentValidation.vitest.ts
  create mode 100644 extensions/cli/src/tools/changeDirectory.ts
  create mode 100644 extensions/cli/src/tools/validateToolArgs.ts
  create mode 100644 extensions/cli/src/util/workspace.test.ts
+ create mode 100644 gui/src/pages/gui/VirtualizedHistory.tsx
 
 diff --git a/core/config/profile/doLoadConfig.ts b/core/config/profile/doLoadConfig.ts
 index b2fd4ed08..1150ce150 100644
@@ -573,7 +575,7 @@ index 000000000..8c23f5ffa
 +  });
 +});
 diff --git a/core/tools/toolCallSanitization.ts b/core/tools/toolCallSanitization.ts
-index db944dd79..24ba3c89f 100644
+index db944dd79..92ad29305 100644
 --- a/core/tools/toolCallSanitization.ts
 +++ b/core/tools/toolCallSanitization.ts
 @@ -74,11 +74,10 @@ export function mergeToolName(current: string, delta: string): string {
@@ -639,7 +641,24 @@ index db944dd79..24ba3c89f 100644
    filepaths: ["files", "paths", "file_paths"],
    maxCharsPerFile: ["max_chars", "maxChars", "limitPerFile"],
    statOnly: ["stat_only", "summaryOnly"],
-@@ -411,8 +418,153 @@ export function normalizeToolArguments(
+@@ -391,9 +398,13 @@ export function normalizeToolArguments(
+ 
+   const properties = schema?.properties;
+   const normalized: Record<string, any> = { ...args };
+-  const canonicalKeys = properties
+-    ? Object.keys(properties)
+-    : Object.keys(ARGUMENT_ALIASES);
++  // Without a schema, aliases are ambiguous (filepath vs file_path could
++  // belong to two different tools). Leave the arguments untouched and let
++  // the caller provide the tool schema.
++  if (!properties) {
++    return normalized;
++  }
++  const canonicalKeys = Object.keys(properties);
+ 
+   for (const canonical of canonicalKeys) {
+     if (normalized[canonical] !== undefined) {
+@@ -411,8 +422,153 @@ export function normalizeToolArguments(
      if (alias !== undefined) {
        normalized[canonical] = normalized[alias];
        delete normalized[alias];
@@ -2765,9 +2784,18 @@ index 6d1939b66..0db2d9a13 100644
    const prefix = endsWithSeparator ? "" : path.basename(absolute).toLowerCase();
    if (!fs.existsSync(base) || !fs.statSync(base).isDirectory()) {
 diff --git a/gui/src/pages/gui/Chat.tsx b/gui/src/pages/gui/Chat.tsx
-index 00e04efd1..4dc93532d 100644
+index 00e04efd1..0fdccffaa 100644
 --- a/gui/src/pages/gui/Chat.tsx
 +++ b/gui/src/pages/gui/Chat.tsx
+@@ -56,7 +56,7 @@ import { cancelStream } from "../../redux/thunks/cancelStream";
+ import { getLocalStorage, setLocalStorage } from "../../util/localStorage";
+ import { EmptyChatBody } from "./EmptyChatBody";
+ import { ExploreDialogWatcher } from "./ExploreDialogWatcher";
+-import { useAutoScroll } from "./useAutoScroll";
++import { VirtualizedHistory } from "./VirtualizedHistory";
+ 
+ // Helper function to find the index of the latest conversation summary
+ function findLatestSummaryIndex(history: ChatHistoryItem[]): number {
 @@ -79,6 +79,15 @@ const StepsDiv = styled.div`
    .thread-message {
      margin: 0 0 0 1px;
@@ -2784,73 +2812,421 @@ index 00e04efd1..4dc93532d 100644
  `;
  
  export const MAIN_EDITOR_INPUT_ID = "main-editor-input";
-@@ -117,6 +126,19 @@ export function Chat() {
+@@ -117,6 +126,9 @@ export function Chat() {
    const stepsDivRef = useRef<HTMLDivElement>(null);
    const tabsRef = useRef<HTMLDivElement>(null);
    const history = useAppSelector((state) => state.session.history);
-+  const MAX_RENDERED_MESSAGES = 80;
-+  const [historyWindow, setHistoryWindow] = useState(MAX_RENDERED_MESSAGES);
 +  const conversationHistory = history.filter(
 +    (item) => item.message.role !== "system",
 +  );
-+  const hiddenMessageCount = Math.max(
-+    0,
-+    conversationHistory.length - historyWindow,
-+  );
-+  const visibleHistory =
-+    hiddenMessageCount > 0
-+      ? conversationHistory.slice(hiddenMessageCount)
-+      : conversationHistory;
    const showChatScrollbar = useAppSelector(
      (state) => state.config.config.ui?.showChatScrollbar,
    );
-@@ -390,13 +412,29 @@ export function Chat() {
+@@ -131,8 +143,6 @@ export function Chat() {
+     return isJetBrains();
+   }, []);
+ 
+-  useAutoScroll(stepsDivRef, history);
+-
+   useEffect(() => {
+     // Cmd + Backspace to delete current step
+     const listener = (e: KeyboardEvent) => {
+@@ -388,28 +398,27 @@ export function Chat() {
+         ref={stepsDivRef}
+         className={`pt-[8px] ${showScrollbar ? "thin-scrollbar" : "no-scrollbar"} ${history.length > 0 ? "min-h-0 flex-1 overflow-y-scroll" : "shrink-0"}`}
        >
-         <DeprecationBanner dismissable={true} />
-         {highlights}
+-        <DeprecationBanner dismissable={true} />
+-        {highlights}
 -        {history
 -          .filter((item) => item.message.role !== "system")
 -          .map((item, index: number) => (
-+        {hiddenMessageCount > 0 && (
-+          <div className="px-2 py-1">
-+            <button
-+              type="button"
-+              className="text-description cursor-pointer text-xs underline"
-+              onClick={() =>
-+                setHistoryWindow((previous) => previous + MAX_RENDERED_MESSAGES)
-+              }
-+            >
-+              Show {Math.min(MAX_RENDERED_MESSAGES, hiddenMessageCount)} earlier
-+              messages
-+            </button>
-+          </div>
-+        )}
-+        {visibleHistory.map((item, visibleIndex: number) => {
-+            const index = hiddenMessageCount + visibleIndex;
-+            return (
-             <div
-               key={item.message.id}
-+              data-chat-message
-               style={{
+-            <div
+-              key={item.message.id}
+-              style={{
 -                minHeight: index === history.length - 1 ? "200px" : 0,
-+                minHeight:
-+                  index === conversationHistory.length - 1 ? "200px" : 0,
++        <VirtualizedHistory
++          scrollRef={stepsDivRef}
++          header={
++            <>
++              <DeprecationBanner dismissable={true} />
++              {highlights}
++            </>
++          }
++          footer={<InlineErrorMessage />}
++          items={conversationHistory}
++          renderItem={(item, index) => (
++            <ErrorBoundary
++              FallbackComponent={fallbackRender}
++              onReset={() => {
++                dispatch(newSession());
                }}
              >
-               <ErrorBoundary
-@@ -407,9 +445,10 @@ export function Chat() {
-               >
-                 {renderChatHistoryItem(item, index)}
-               </ErrorBoundary>
+-              <ErrorBoundary
+-                FallbackComponent={fallbackRender}
+-                onReset={() => {
+-                  dispatch(newSession());
+-                }}
+-              >
+-                {renderChatHistoryItem(item, index)}
+-              </ErrorBoundary>
 -              {index === history.length - 1 && <InlineErrorMessage />}
-+              {index === conversationHistory.length - 1 && <InlineErrorMessage />}
-             </div>
+-            </div>
 -          ))}
-+            );
-+          })}
++              {renderChatHistoryItem(item, index)}
++            </ErrorBoundary>
++          )}
++        />
        </StepsDiv>
        <div className={"relative shrink-0"}>
          <ContinueInputBox
+diff --git a/gui/src/pages/gui/VirtualizedHistory.tsx b/gui/src/pages/gui/VirtualizedHistory.tsx
+new file mode 100644
+index 000000000..2739def51
+--- /dev/null
++++ b/gui/src/pages/gui/VirtualizedHistory.tsx
+@@ -0,0 +1,342 @@
++import {
++  useEffect,
++  useLayoutEffect,
++  useMemo,
++  useRef,
++  useState,
++  type ReactNode,
++  type RefObject,
++} from "react";
++
++import type { ChatHistoryItemWithMessageId } from "../../redux/slices/sessionSlice";
++
++const ESTIMATED_USER_HEIGHT = 96;
++const ESTIMATED_MESSAGE_HEIGHT = 180;
++const OVERSCAN_PX = 600;
++
++interface VirtualizedHistoryProps {
++  scrollRef: RefObject<HTMLDivElement>;
++  header?: ReactNode;
++  footer?: ReactNode;
++  items: ChatHistoryItemWithMessageId[];
++  renderItem: (
++    item: ChatHistoryItemWithMessageId,
++    index: number,
++  ) => ReactNode;
++}
++
++function estimateHeight(item: ChatHistoryItemWithMessageId): number {
++  return item.message.role === "user"
++    ? ESTIMATED_USER_HEIGHT
++    : ESTIMATED_MESSAGE_HEIGHT;
++}
++
++function findIndexAtOffset(offsets: number[], offset: number): number {
++  if (offsets.length === 0) {
++    return 0;
++  }
++  let low = 0;
++  let high = offsets.length - 1;
++  while (low < high) {
++    const mid = Math.ceil((low + high) / 2);
++    if (offsets[mid] <= offset) {
++      low = mid;
++    } else {
++      high = mid - 1;
++    }
++  }
++  return low;
++}
++
++/**
++ * Dependency-free virtualized chat history.
++ *
++ * Only the rows intersecting the viewport (plus a small overscan) are mounted.
++ * Heights are measured with ResizeObserver and remembered by message id, so
++ * markdown, code blocks and streaming content can change height without
++ * rendering the entire conversation. Following the bottom is preserved when
++ * the user has not scrolled up, including while the last message streams.
++ */
++const VIRTUALIZE_AFTER = 100;
++
++/**
++ * Small conversations are cheaper to render as a normal list (and keep all
++ * browser semantics, find-in-page and test behaviour). Long sessions switch
++ * to the dependency-free virtualizer below.
++ */
++export function VirtualizedHistory(props: VirtualizedHistoryProps) {
++  if (props.items.length <= VIRTUALIZE_AFTER) {
++    return (
++      <>
++        {props.header}
++        {props.items.map((item, index) => {
++          return <div key={item.message.id}>{props.renderItem(item, index)}</div>;
++        })}
++        {props.footer}
++      </>
++    );
++  }
++  return <VirtualizedHistoryRows {...props} />;
++}
++
++function VirtualizedHistoryRows({
++  scrollRef,
++  header,
++  footer,
++  items,
++  renderItem,
++}: VirtualizedHistoryProps) {
++  const [measureVersion, setMeasureVersion] = useState(0);
++  const [scrollTop, setScrollTop] = useState(0);
++  const [viewportHeight, setViewportHeight] = useState(0);
++  const [headerHeight, setHeaderHeight] = useState(0);
++
++  const heights = useRef(new Map<string, number>());
++  const observers = useRef(new Map<string, ResizeObserver>());
++  const rowRefs = useRef(new Map<string, (element: HTMLDivElement | null) => void>());
++  // Measurements arrive in batches; each batch triggers one render.
++  const pendingMeasurements = useRef(new Map<string, number>());
++  const measurementFrame = useRef<number | null>(null);
++  const scrollFrame = useRef<number | null>(null);
++  const itemsRef = useRef(items);
++  const startIndexRef = useRef(0);
++  const headerRef = useRef<HTMLDivElement>(null);
++  const followBottom = useRef(true);
++  const previousUserCount = useRef(0);
++
++  itemsRef.current = items;
++
++  const userCount = useMemo(
++    () => items.filter((item) => item.message.role === "user").length,
++    [items],
++  );
++
++  const offsets = useMemo(() => {
++    const result: number[] = [];
++    let offset = 0;
++    for (const item of items) {
++      result.push(offset);
++      offset += heights.current.get(item.message.id) ?? estimateHeight(item);
++    }
++    return result;
++  }, [items, measureVersion]);
++
++  const totalHeight = useMemo(() => {
++    if (items.length === 0) {
++      return 0;
++    }
++    const last = items[items.length - 1];
++    return (
++      offsets[offsets.length - 1] +
++      (heights.current.get(last.message.id) ?? estimateHeight(last))
++    );
++  }, [items, offsets, measureVersion]);
++
++  const relativeScrollTop = Math.max(0, scrollTop - headerHeight);
++  const startIndex = findIndexAtOffset(
++    offsets,
++    relativeScrollTop - OVERSCAN_PX,
++  );
++  const endIndex = Math.min(
++    items.length,
++    findIndexAtOffset(
++      offsets,
++      relativeScrollTop + Math.max(viewportHeight, 400) + OVERSCAN_PX,
++    ) + 1,
++  );
++  startIndexRef.current = startIndex;
++
++  const scrollToBottom = () => {
++    const element = scrollRef.current;
++    if (!element) {
++      return;
++    }
++    element.scrollTop = element.scrollHeight;
++  };
++
++  // Track the viewport and whether the user is at the bottom.
++  useEffect(() => {
++    const element = scrollRef.current;
++    if (!element) {
++      return;
++    }
++
++    const handleScroll = () => {
++      followBottom.current =
++        element.scrollHeight - element.scrollTop - element.clientHeight < 24;
++      // Coalesce scroll-driven renders into one animation frame.
++      if (scrollFrame.current === null) {
++        scrollFrame.current = requestAnimationFrame(() => {
++          scrollFrame.current = null;
++          setScrollTop(element.scrollTop);
++        });
++      }
++    };
++
++    handleScroll();
++    element.addEventListener("scroll", handleScroll, { passive: true });
++    return () => {
++      element.removeEventListener("scroll", handleScroll);
++      if (scrollFrame.current !== null) {
++        cancelAnimationFrame(scrollFrame.current);
++        scrollFrame.current = null;
++      }
++    };
++  }, [scrollRef]);
++
++  useLayoutEffect(() => {
++    const element = scrollRef.current;
++    if (!element) {
++      return;
++    }
++
++    const observer = new ResizeObserver(() => {
++      setViewportHeight(element.clientHeight);
++    });
++    observer.observe(element);
++    setViewportHeight(element.clientHeight);
++    return () => observer.disconnect();
++  }, [scrollRef]);
++
++  useLayoutEffect(() => {
++    const element = headerRef.current;
++    if (!element) {
++      setHeaderHeight(0);
++      return;
++    }
++
++    const observer = new ResizeObserver(() => {
++      setHeaderHeight(element.offsetHeight);
++    });
++    observer.observe(element);
++    setHeaderHeight(element.offsetHeight);
++    return () => observer.disconnect();
++  }, []);
++
++  useLayoutEffect(() => {
++    if (userCount > previousUserCount.current) {
++      followBottom.current = true;
++    }
++    previousUserCount.current = userCount;
++    if (followBottom.current) {
++      scrollToBottom();
++    }
++  }, [userCount, items.length, measureVersion]);
++
++  useEffect(
++    () => () => {
++      observers.current.forEach((observer) => observer.disconnect());
++      observers.current.clear();
++      if (measurementFrame.current !== null) {
++        cancelAnimationFrame(measurementFrame.current);
++        measurementFrame.current = null;
++      }
++    },
++    [],
++  );
++
++  const flushMeasurements = () => {
++    if (measurementFrame.current !== null) {
++      return;
++    }
++    measurementFrame.current = requestAnimationFrame(() => {
++      measurementFrame.current = null;
++      if (pendingMeasurements.current.size === 0) {
++        return;
++      }
++
++      let scrollAdjustment = 0;
++      const currentItems = itemsRef.current;
++      for (const [id, height] of pendingMeasurements.current) {
++        const previous = heights.current.get(id);
++        if (previous === height) {
++          continue;
++        }
++        const index = currentItems.findIndex(
++          (item) => item.message.id === id,
++        );
++        // A row above the viewport grew/shrank. Keep the visible content
++        // anchored instead of letting it jump, like react-virtuoso's size
++        // range system does.
++        if (
++          !followBottom.current &&
++          previous !== undefined &&
++          index >= 0 &&
++          index < startIndexRef.current
++        ) {
++          scrollAdjustment += height - previous;
++        }
++        heights.current.set(id, height);
++      }
++      pendingMeasurements.current.clear();
++
++      if (scrollAdjustment !== 0 && scrollRef.current) {
++        scrollRef.current.scrollTop += scrollAdjustment;
++        setScrollTop(scrollRef.current.scrollTop);
++      }
++      setMeasureVersion((version) => version + 1);
++    });
++  };
++
++  const getRowRef = (id: string) => {
++    let ref = rowRefs.current.get(id);
++    if (ref) {
++      return ref;
++    }
++
++    ref = (element: HTMLDivElement | null) => {
++      const previous = observers.current.get(id);
++      if (previous) {
++        previous.disconnect();
++        observers.current.delete(id);
++      }
++      if (!element) {
++        return;
++      }
++
++      const measure = () => {
++        const height = Math.ceil(element.getBoundingClientRect().height);
++        if (height > 0 && heights.current.get(id) !== height) {
++          pendingMeasurements.current.set(id, height);
++          flushMeasurements();
++        }
++      };
++
++      measure();
++      const observer = new ResizeObserver(measure);
++      observer.observe(element);
++      observers.current.set(id, observer);
++    };
++    rowRefs.current.set(id, ref);
++    return ref;
++  };
++
++  return (
++    <>
++      <div ref={headerRef}>{header}</div>
++      <div style={{ height: totalHeight, position: "relative" }}>
++        {items.slice(startIndex, endIndex).map((item, visibleIndex) => {
++          const index = startIndex + visibleIndex;
++          return (
++            <div
++              key={item.message.id}
++              ref={getRowRef(item.message.id)}
++              style={{
++                position: "absolute",
++                top: offsets[index],
++                left: 0,
++                right: 0,
++                minHeight: heights.current.has(item.message.id)
++                  ? undefined
++                  : estimateHeight(item),
++              }}
++            >
++              {renderItem(item, index)}
++            </div>
++          );
++        })}
++      </div>
++      {footer}
++    </>
++  );
++}
 diff --git a/gui/src/redux/slices/sessionSlice.ts b/gui/src/redux/slices/sessionSlice.ts
 index eaed1eb2d..c72c54907 100644
 --- a/gui/src/redux/slices/sessionSlice.ts
