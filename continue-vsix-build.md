@@ -437,8 +437,8 @@ Validation finale du patch 07 sur un worktree propre (les 7 patchs réappliqués
 - `git am` des 7 patchs : OK, **28 commits** ;
 - build packages + core + CLI + GUI : OK ;
 - tests CLI complets : **1733 passés**, 29 ignorés ;
-- tests core ciblés (tools, messages, grep) : **107 passés** ;
-- tests MCP core + CLI : **40 + 20 passés** (2 ignorés côté core) ;
+- tests core ciblés (tools, messages, MCP, grep) : **147 passés**, 2 ignorés ;
+- tests MCP CLI : **20 passés** ;
 - tests GUI (chat, tools, virtualisation, mode de déclaration) : **50 passés** ;
 - `tsc` core/CLI/GUI : OK ;
 - contrôle Chrome headless du composer : aucun débordement horizontal, bouton

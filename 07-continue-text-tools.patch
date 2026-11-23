@@ -1,4 +1,4 @@
-From c9f42afe9e2c79de1b2dfd0d6dffaf5d97b2c76b Mon Sep 17 00:00:00 2001
+From e47b66678710db86f5982e1b782e260edb7d4404 Mon Sep 17 00:00:00 2001
 From: Sam <sam@example.com>
 Date: Mon, 23 Nov 2026 20:11:56 +0100
 Subject: [PATCH] fix(tools): make text mode reliable for OpenAI-compatible
@@ -12,7 +12,7 @@ Also align CLI and VS Code tool names/arguments (Write/create_new_file, Edit/sin
  core/context/mcp/MCPManagerSingleton.ts       |  62 ++-
  core/core.ts                                  |  15 +-
  core/index.d.ts                               |   2 +-
- core/llm/defaultSystemMessages.ts             |  24 +-
+ core/llm/defaultSystemMessages.ts             |  26 +-
  core/tools/callTool.ts                        |  13 +-
  core/tools/definitions/applyPatch.ts          |  12 +-
  core/tools/definitions/askQuestion.ts         |   1 +
@@ -22,6 +22,7 @@ Also align CLI and VS Code tool names/arguments (Write/create_new_file, Edit/sin
  core/tools/definitions/runTerminalCommand.ts  |   2 +-
  core/tools/implementations/applyPatch.ts      |  19 +
  core/tools/implementations/grepSearch.ts      |   2 +-
+ core/tools/implementations/readFileRange.ts   |   4 +-
  .../toolCodeblocks/index.ts                   |  17 +-
  core/tools/toolArgumentValidation.ts          | 223 +++++++++
  core/tools/toolArgumentValidation.vitest.ts   | 138 ++++++
@@ -38,8 +39,8 @@ Also align CLI and VS Code tool names/arguments (Write/create_new_file, Edit/sin
  .../src/stream/streamChatResponse.helpers.ts  | 174 ++++---
  .../cli/src/stream/streamChatResponse.ts      |  31 +-
  extensions/cli/src/stream/streamResilience.ts |  40 +-
- extensions/cli/src/systemMessage.test.ts      |  12 +
- extensions/cli/src/systemMessage.ts           |  48 +-
+ extensions/cli/src/systemMessage.test.ts      |  20 +-
+ extensions/cli/src/systemMessage.ts           |  50 +-
  extensions/cli/src/tools/allBuiltIns.ts       |   2 +
  extensions/cli/src/tools/applyPatch.ts        |  35 +-
  extensions/cli/src/tools/askQuestion.ts       |   2 +-
@@ -93,7 +94,7 @@ Also align CLI and VS Code tool names/arguments (Write/create_new_file, Edit/sin
  .../redux/util/toolDeclarationMode.test.ts    |  59 +++
  gui/src/redux/util/toolDeclarationMode.ts     |  42 ++
  gui/src/util/clientTools/callClientTool.ts    |   8 +-
- 85 files changed, 3095 insertions(+), 617 deletions(-)
+ 86 files changed, 3103 insertions(+), 625 deletions(-)
  create mode 100644 core/tools/toolArgumentValidation.ts
  create mode 100644 core/tools/toolArgumentValidation.vitest.ts
  create mode 100644 extensions/cli/src/tools/changeDirectory.ts
@@ -262,7 +263,7 @@ index 502ae4201..58be62794 100644
    maxAgentTurns?: number;
  }
 diff --git a/core/llm/defaultSystemMessages.ts b/core/llm/defaultSystemMessages.ts
-index 341b37393..18e59891c 100644
+index 341b37393..f16e085c0 100644
 --- a/core/llm/defaultSystemMessages.ts
 +++ b/core/llm/defaultSystemMessages.ts
 @@ -70,8 +70,28 @@ export const DEFAULT_AGENT_SYSTEM_MESSAGE = `\
@@ -296,6 +297,15 @@ index 341b37393..18e59891c 100644
  
  ${CODEBLOCK_FORMATTING_INSTRUCTIONS}
  
+@@ -86,7 +106,7 @@ However, only output codeblocks for suggestion and demonstration purposes, for e
+ export const DEFAULT_PLAN_SYSTEM_MESSAGE = `\
+ <important_rules>
+   You are in plan mode, in which you help the user understand and construct a plan.
+-  Only use read-only tools. Do not use any tools that would write to non-temporary files.
++  Only use tools in a read-only way for inspection. Do not use any tool that would write to non-temporary files.
+   If the user wants to make changes, offer that they can switch to Agent mode to give you access to write tools to make the suggested updates.
+   Execute a read-only tool immediately when it is needed. Do not announce the next
+   tool action in prose before calling it.
 diff --git a/core/tools/callTool.ts b/core/tools/callTool.ts
 index b8b3a9753..fbe8e440f 100644
 --- a/core/tools/callTool.ts
@@ -494,6 +504,26 @@ index 40290defc..cdb7b8cea 100644
          },
        ];
      }
+diff --git a/core/tools/implementations/readFileRange.ts b/core/tools/implementations/readFileRange.ts
+index 1facb4573..c31c47dbb 100644
+--- a/core/tools/implementations/readFileRange.ts
++++ b/core/tools/implementations/readFileRange.ts
+@@ -20,13 +20,13 @@ export const readFileRangeImpl: ToolImpl = async (args, extras) => {
+   if (startLine < 1) {
+     throw new ContinueError(
+       ContinueErrorReason.InvalidLineNumber,
+-      "startLine must be 1 or greater. Negative line numbers are not supported - use the terminal tool with 'tail' command for reading from file end.",
++      "startLine must be 1 or greater. Negative line numbers are not supported. Use grep_search to locate the target or read the file first.",
+     );
+   }
+   if (endLine < 1) {
+     throw new ContinueError(
+       ContinueErrorReason.InvalidLineNumber,
+-      "endLine must be 1 or greater. Negative line numbers are not supported - use the terminal tool with 'tail' command for reading from file end.",
++      "endLine must be 1 or greater. Negative line numbers are not supported. Use grep_search to locate the target or read the file first.",
+     );
+   }
+   if (endLine < startLine) {
 diff --git a/core/tools/systemMessageTools/toolCodeblocks/index.ts b/core/tools/systemMessageTools/toolCodeblocks/index.ts
 index 44c8e6921..92b6d6f16 100644
 --- a/core/tools/systemMessageTools/toolCodeblocks/index.ts
@@ -2272,7 +2302,7 @@ index dc241e6cb..e98f521c5 100644
        );
        connectionPhase = false;
 diff --git a/extensions/cli/src/systemMessage.test.ts b/extensions/cli/src/systemMessage.test.ts
-index 1ebab348b..bd63388f3 100644
+index 1ebab348b..d867057b5 100644
 --- a/extensions/cli/src/systemMessage.test.ts
 +++ b/extensions/cli/src/systemMessage.test.ts
 @@ -63,6 +63,18 @@ describe("constructSystemMessage", () => {
@@ -2294,8 +2324,31 @@ index 1ebab348b..bd63388f3 100644
    it("should include platform information", async () => {
      const result = await constructSystemMessage("normal");
  
+@@ -184,9 +196,9 @@ Rule 3: Third rule`;
+       "which means that your goal is to help the user investigate their ideas",
+     );
+     expect(result).toContain("develop a plan before taking action");
+-    expect(result).toContain("read-only tools");
++    expect(result).toContain("read-only inspection");
+     expect(result).toContain(
+-      "should not attempt to circumvent them to write / delete / create files",
++      "do not attempt to write, delete or create files",
+     );
+   });
+ 
+@@ -224,8 +236,8 @@ Rule 3: Third rule`;
+     );
+ 
+     expect(result).toContain(PLAN_MODE_STRING);
+-    expect(result).toContain("read-only tools");
+-    expect(result).toContain("write / delete / create files");
++    expect(result).toContain("read-only inspection");
++    expect(result).toContain("write, delete or create files");
+   });
+ 
+   it("should combine plan mode with headless mode instructions", async () => {
 diff --git a/extensions/cli/src/systemMessage.ts b/extensions/cli/src/systemMessage.ts
-index 1cc93f6de..7f6c18c8b 100644
+index 1cc93f6de..971f226a6 100644
 --- a/extensions/cli/src/systemMessage.ts
 +++ b/extensions/cli/src/systemMessage.ts
 @@ -44,14 +44,47 @@ function getGitStatus(): string {
@@ -2369,6 +2422,15 @@ index 1cc93f6de..7f6c18c8b 100644
  
    // Chat mode is a plain conversation without tools
    if (mode === "chat") {
+@@ -235,7 +269,7 @@ If the user's request requires acting on files or running commands, ask them to
+   // Add plan mode specific instructions if in plan mode
+   if (mode === "plan") {
+     systemMessage +=
+-      '\n<context name="planMode">You are operating in _Plan Mode_, which means that your goal is to help the user investigate their ideas and develop a plan before taking action. You only have access to read-only tools and should not attempt to circumvent them to write / delete / create files. Ask the user to switch to agent mode if they want to make changes. For example, it is not acceptable to use the Bash tool to write to files.</context>\n';
++      '\n<context name="planMode">You are operating in _Plan Mode_, which means that your goal is to help the user investigate their ideas and develop a plan before taking action. Use tools only for read-only inspection and do not attempt to write, delete or create files. Ask the user to switch to agent mode if they want to make changes. For example, it is not acceptable to use the Bash tool to write to files.</context>\n';
+   } else {
+     // Check if commit signature is disabled via environment variable
+     if (!process.env.CONTINUE_CLI_DISABLE_COMMIT_SIGNATURE && mode !== "chat") {
 diff --git a/extensions/cli/src/tools/allBuiltIns.ts b/extensions/cli/src/tools/allBuiltIns.ts
 index dcd687b14..16037ea41 100644
 --- a/extensions/cli/src/tools/allBuiltIns.ts
