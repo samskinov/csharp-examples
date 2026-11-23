@@ -1,22 +1,25 @@
 # Installer / compiler Continue (VS Code + CLI) avec les patchs
 
-Ce repo fournit **5 patchs** à appliquer sur `continuedev/continue` (v2.1.0 ou
+Ce repo fournit **7 patchs** à appliquer sur `continuedev/continue` (v2.1.0 ou
 main) qui suppriment les dépendances aux binaires natifs (SQLite natif,
 ripgrep), rendent le build reproductible depuis le registry npm seul et
 corrigent l'activation Windows — pensés pour les postes derrière un proxy
 d'entreprise.
 
-## Les 5 patchs (dans cet ordre)
+## Les 7 patchs (dans cet ordre)
 
 | Ordre | Fichier | Contenu |
 |---|---|---|
-| 1 | `01-continue-improvements.patch` | 14 commits
-| 2 | `02-continue-cli-modes.patch` | 4 commits
-| 3 | `03-continue-fallbacks.patch` | 1 commit
-| 4 | `04-continue-cli-tools.patch` | 6 commits
-| 5 | `05-continue-vscode-activation.patch` | 1 commit
-| 6 | `06-continue-agent-performance.patch`
+| 1 | `01-continue-improvements.patch` | 14 commits : résilience stream/thinking/429, freezes, tools, watchdog |
+| 2 | `02-continue-cli-modes.patch` | 4 commits : CLI chat/plan/agent + tools text, streaming live, perf GUI |
+| 3 | `03-continue-fallbacks.patch` | 1 commit : SQLite WASM, plus de `dbinfoz`/`@database`, recherche intégrée, prepackage |
+| 4 | `04-continue-cli-tools.patch` | 6 commits : chat sans tools natifs, system message unique, `/tool-mode`, tool calls XML, fallback texte, VSIX ciblé |
+| 5 | `05-continue-vscode-activation.patch` | 1 commit : logs d'activation, `system-ca` dynamique, binding `win-ca` |
+| 6 | `06-continue-agent-performance.patch` | 1 commit : outils agent, boucles et streaming texte |
+| 7 | `07-continue-text-tools.patch` | 1 commit : mode texte fiable OpenAI-compatible, aucun `tools`/`tool_calls` natif, schémas/exemples, validation et correction des arguments, `/cd` persistant, ChangeDirectory, MCP prêt avant la première requête, réduction des freeze GUI |
 
+⚠️ Empilement vérifié : `git am` 14+4+1+6+1+1+1 = **28 commits** sur
+`refs/heads/main` propre.
 
 ## 1. Clone + patchs
 
@@ -25,7 +28,7 @@ git clone https://github.com/continuedev/continue continue
 cd continue
 git checkout main
 
-:: télécharger les 5 patchs depuis ce repo (navigateur OK) :
+:: télécharger les 7 patchs depuis ce repo (navigateur OK) :
 ::   raw.githubusercontent.com/samskinov/csharp-examples/main/<fichier>.patch
 git am 01-continue-improvements.patch
 git am 02-continue-cli-modes.patch
@@ -33,6 +36,7 @@ git am 03-continue-fallbacks.patch
 git am 04-continue-cli-tools.patch
 git am 05-continue-vscode-activation.patch
 git am 06-continue-agent-performance.patch
+git am 07-continue-text-tools.patch
 :: (secours si git am échoue : git apply -3 <fichier>)
 ```
 
@@ -261,7 +265,56 @@ En headless (`-p`), il n'y a pas de confirmation interactive : les tools en
 politique `ask` ne sont pas proposés. Utiliser `--allow Read` (etc.) pour en
 autoriser un précis, ou `--auto`.
 
+### OpenAI-compatible : mode texte obligatoire
+
+Si le proxy refuse toute requête contenant `tools`, utiliser le protocole
+texte (c'est le défaut du CLI) :
+
+```cmd
+node dist\cn.js --tool-mode text ...
+```
+
+Le CLI n'envoie alors **ni `tools`, ni `tool_calls` dans l'historique, ni
+messages `role: tool`** : les appels sont dans des blocs Markdown et les
+résultats sont renvoyés dans des blocs `tool_result` en rôle `user`.
+
+Côté extension VS Code, le mode texte est sélectionné automatiquement pour
+`ollama` et pour les endpoints OpenAI personnalisés (`apiBase` ou
+`onPremProxyUrl`). Pour forcer globalement :
+
+```yaml
+experimental:
+  onlyUseSystemMessageTools: true
+```
+
+Le modèle reçoit alors les définitions et exemples de tools dans le system
+message, avec les paramètres requis et un exemple concret par outil. Si un
+appel est invalide, Continue renvoie le schéma et un exemple corrigé au lieu
+d'exécuter l'appel ; le modèle doit corriger ses arguments au lieu de répéter
+la même erreur.
+
+`ApplyPatch` est l'outil d'édition privilégié pour les fichiers existants ;
+`AskQuestion` est l'outil à utiliser pour toute clarification ; `ChangeDirectory`
+change réellement le répertoire de travail persistant (un `cd` dans Bash ne
+dure qu'une commande).
+
 ## 5. Notes
+
+- **MCP jaune / tools MCP invisibles au premier message** : le handshake MCP
+  est asynchrone. Continue attend maintenant jusqu'à 8 s avant la première
+  requête et recharge la config quand les tools arrivent. Si le serveur reste
+  jaune, le problème est côté serveur MCP (commande, proxy, npx) : le stderr
+  est dans l'erreur du panneau MCP et dans le log Extension Host.
+- **Freeze VS Code pendant « generating »** : la webview ne rend plus tout
+  l'historique à chaque token. Les messages hors écran utilisent
+  `content-visibility`, seuls les 80 derniers sont montés par défaut (bouton
+  « Show earlier messages »), et un stream silencieux est maintenant retenté
+  au bout de 60 s avec un message visible au lieu de laisser « generating »
+  indéfiniment.
+- **`/cd` dans le CLI** : le répertoire change réellement (`process.chdir`),
+  et la session, l'index de fichiers et les hooks sont mis à jour. Le tool
+  `ChangeDirectory` fait la même chose pour le modèle ; un `cd` dans Bash ne
+  dure qu'une commande.
 
 - **« Tool ... not found » avec un nom terminé par `</arg_value>`** : certains
   serveurs OpenAI-compatibles (GLM via litellm/Ollama) laissent fuiter la

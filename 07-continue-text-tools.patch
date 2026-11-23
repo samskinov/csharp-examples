@@ -1,0 +1,2392 @@
+From 0c080d7b4ededc9473f9527078a79fb32fde8f41 Mon Sep 17 00:00:00 2001
+From: Sam <sam@example.com>
+Date: Mon, 23 Nov 2026 20:11:56 +0100
+Subject: [PATCH] fix(tools): make text mode reliable for OpenAI-compatible
+ providers
+
+Rework the text/markdown tool protocol so it never depends on native tools: richer per-tool schemas and examples, ApplyPatch/AskQuestion/ChangeDirectory guidance, recursive argument validation with schema feedback, markdown/JSON/XML parsers, and text-mode history that sends no tools key, no assistant.tool_calls and no tool roles (results are user tool_result blocks).
+
+Also persist /cd (session, file index, hooks), add the ChangeDirectory tool, fix MCP prefixed tool lookup and wait for MCP handshakes before the first request, and reduce VS Code webview freezes with content-visibility/windowing and retry status.
+---
+ core/config/profile/doLoadConfig.ts           |   4 +-
+ core/context/mcp/MCPManagerSingleton.ts       |  39 +-
+ core/core.ts                                  |  10 +
+ core/llm/defaultSystemMessages.ts             |   6 +
+ core/tools/definitions/applyPatch.ts          |   2 +-
+ .../toolCodeblocks/index.ts                   |   5 +-
+ core/tools/toolArgumentValidation.ts          | 159 +++++++++
+ core/tools/toolArgumentValidation.vitest.ts   |  87 +++++
+ core/util/messageConversion.ts                |  57 +++
+ extensions/cli/src/messageConversion.test.ts  |  50 +++
+ .../cli/src/permissions/defaultPolicies.ts    |  24 ++
+ extensions/cli/src/services/MCPService.ts     |  38 +-
+ extensions/cli/src/session.ts                 |  14 +
+ extensions/cli/src/slashCommands.ts           |  11 +-
+ extensions/cli/src/stream/handleToolCalls.ts  |   9 +
+ .../src/stream/streamChatResponse.helpers.ts  |  14 +
+ .../cli/src/stream/streamChatResponse.ts      |   1 +
+ extensions/cli/src/stream/streamResilience.ts |  40 ++-
+ extensions/cli/src/systemMessage.ts           |   4 +
+ extensions/cli/src/tools/allBuiltIns.ts       |   2 +
+ extensions/cli/src/tools/applyPatch.ts        |  15 +-
+ extensions/cli/src/tools/builtInToolNames.ts  |   1 +
+ extensions/cli/src/tools/changeDirectory.ts   |  39 ++
+ extensions/cli/src/tools/edit.test.ts         |   1 +
+ extensions/cli/src/tools/index.tsx            |   2 +
+ extensions/cli/src/tools/multiEdit.test.ts    |   1 +
+ extensions/cli/src/tools/readFile.ts          |  21 +-
+ .../cli/src/tools/runTerminalCommand.ts       |   4 +-
+ extensions/cli/src/tools/searchCode.test.ts   |   2 +-
+ extensions/cli/src/tools/searchCode.ts        |  60 ++--
+ extensions/cli/src/tools/textToolMode.test.ts |   7 +-
+ extensions/cli/src/tools/textToolMode.ts      | 337 ++++++++++++++----
+ extensions/cli/src/tools/types.ts             |   1 +
+ extensions/cli/src/tools/validateToolArgs.ts  | 118 ++++++
+ .../ui/__tests__/TUIChat.planModeBug.test.tsx |  24 +-
+ .../src/ui/components/ModeIndicator.test.tsx  |  12 +-
+ .../src/ui/components/StaticChatContent.tsx   |  27 +-
+ .../cli/src/ui/hooks/useChat.helpers.ts       |   9 +-
+ extensions/cli/src/util/workspace.test.ts     |  42 +++
+ extensions/cli/src/util/workspace.ts          |  43 ++-
+ gui/src/pages/gui/Chat.tsx                    |  47 ++-
+ gui/src/redux/thunks/streamNormalInput.ts     |  27 +-
+ gui/src/redux/thunks/streamThunkWrapper.tsx   |   9 +
+ 43 files changed, 1191 insertions(+), 234 deletions(-)
+ create mode 100644 core/tools/toolArgumentValidation.ts
+ create mode 100644 core/tools/toolArgumentValidation.vitest.ts
+ create mode 100644 extensions/cli/src/tools/changeDirectory.ts
+ create mode 100644 extensions/cli/src/tools/validateToolArgs.ts
+ create mode 100644 extensions/cli/src/util/workspace.test.ts
+
+diff --git a/core/config/profile/doLoadConfig.ts b/core/config/profile/doLoadConfig.ts
+index b2fd4ed08..1150ce150 100644
+--- a/core/config/profile/doLoadConfig.ts
++++ b/core/config/profile/doLoadConfig.ts
+@@ -191,8 +191,10 @@ export default async function doLoadConfig(options: {
+   // Rectify model selections for each role
+   newConfig = rectifySelectedModelsFromGlobalContext(newConfig, profileId);
+ 
+-  // Add things from MCP servers
++  // Add things from MCP servers. In VS Code the handshake is asynchronous; a
++  // bounded wait prevents the first conversation from missing every MCP tool.
+   const mcpManager = MCPManagerSingleton.getInstance();
++  await mcpManager.waitForConnections(8000);
+   const mcpServerStatuses = mcpManager.getStatuses();
+ 
+   const serializableStatuses = mcpServerStatuses.map((server) => {
+diff --git a/core/context/mcp/MCPManagerSingleton.ts b/core/context/mcp/MCPManagerSingleton.ts
+index cac57e1e6..cb71af82d 100644
+--- a/core/context/mcp/MCPManagerSingleton.ts
++++ b/core/context/mcp/MCPManagerSingleton.ts
+@@ -10,6 +10,7 @@ export class MCPManagerSingleton {
+   public connections: Map<string, MCPConnection> = new Map();
+ 
+   private abortController: AbortController = new AbortController();
++  private refreshPromise: Promise<void> = Promise.resolve();
+ 
+   private constructor() {}
+ 
+@@ -155,22 +156,40 @@ export class MCPManagerSingleton {
+   async refreshConnections(force: boolean) {
+     this.abortController.abort();
+     this.abortController = new AbortController();
++    const run = (async () => {
++      await Promise.all(
++        Array.from(this.connections.values()).map(async (connection) => {
++          await connection.connectClient(force, this.abortController.signal);
++        }),
++      );
++    })();
++    this.refreshPromise = run;
++    // Notify after the connection promise has settled. The callback reloads
++    // config, which calls waitForConnections(); notifying inside `run` would
++    // make it await itself and stall every reload for the full timeout.
++    void run.then(() => {
++      if (this.onConnectionsRefreshed) {
++        this.onConnectionsRefreshed();
++      }
++    });
+     await Promise.race([
+       new Promise((resolve) => {
+         this.abortController.signal.addEventListener("abort", () => {
+           resolve(undefined);
+         });
+       }),
+-      (async () => {
+-        await Promise.all(
+-          Array.from(this.connections.values()).map(async (connection) => {
+-            await connection.connectClient(force, this.abortController.signal);
+-          }),
+-        );
+-        if (this.onConnectionsRefreshed) {
+-          this.onConnectionsRefreshed();
+-        }
+-      })(),
++      run,
++    ]);
++  }
++
++  /**
++   * Wait for the initial MCP handshakes so config loading includes their
++   * tools. Bounded so a broken server cannot freeze the extension.
++   */
++  async waitForConnections(timeoutMs = 8000): Promise<void> {
++    await Promise.race([
++      this.refreshPromise.catch(() => undefined),
++      new Promise<void>((resolve) => setTimeout(resolve, timeoutMs)),
+     ]);
+   }
+ 
+diff --git a/core/core.ts b/core/core.ts
+index 93db22182..4019937d9 100644
+--- a/core/core.ts
++++ b/core/core.ts
+@@ -20,6 +20,10 @@ import Ollama from "./llm/llms/Ollama";
+ import { EditAggregator } from "./nextEdit/context/aggregateEdits";
+ import { createNewPromptFileV2 } from "./promptFiles/createNewPromptFile";
+ import { callTool } from "./tools/callTool";
++import {
++  buildToolCallRejectionMessage,
++  validateToolArguments,
++} from "./tools/toolArgumentValidation";
+ import {
+   normalizeToolArguments,
+   resolveToolName,
+@@ -1113,6 +1117,12 @@ export class Core {
+           args,
+           tool.function.parameters,
+         );
++        const issues = validateToolArguments(tool, normalizedArgs);
++        if (issues.length > 0) {
++          throw new Error(
++            buildToolCallRejectionMessage(tool, normalizedArgs, issues),
++          );
++        }
+         const preprocessedArgs = await tool.preprocessArgs?.(normalizedArgs, {
+           ide: this.ide,
+         });
+diff --git a/core/llm/defaultSystemMessages.ts b/core/llm/defaultSystemMessages.ts
+index 341b37393..420886315 100644
+--- a/core/llm/defaultSystemMessages.ts
++++ b/core/llm/defaultSystemMessages.ts
+@@ -72,6 +72,12 @@ export const DEFAULT_AGENT_SYSTEM_MESSAGE = `\
+   Do not repeat an action with the same tool arguments if the result is unchanged.
+   If a task requires more context, use a targeted read or search and stop after each
+   tool result instead of narrating the next step.
++  When you need a clarification, a preference or a decision from the user, call
++  AskQuestion instead of writing a question in prose and ending the turn.
++  To modify existing files, prefer ApplyPatch (one atomic patch, multiple files);
++  use edit_existing_file for a small exact replacement and create_new_file only for
++  a new file or a complete rewrite. Do not use run_terminal_command with sed, awk,
++  cat, echo, tee or Python to modify project files.
+ 
+ ${CODEBLOCK_FORMATTING_INSTRUCTIONS}
+ 
+diff --git a/core/tools/definitions/applyPatch.ts b/core/tools/definitions/applyPatch.ts
+index 2e8f6c992..f95e8ad45 100644
+--- a/core/tools/definitions/applyPatch.ts
++++ b/core/tools/definitions/applyPatch.ts
+@@ -13,7 +13,7 @@ export const applyPatchTool: Tool = {
+   function: {
+     name: BuiltInToolNames.ApplyPatch,
+     description:
+-      "Apply an atomic unified patch to one or more existing files. Do not use this tool for new files; use CreateNewFile/Write.",
++      "Apply an atomic unified patch to one or more EXISTING files. Prefer this tool when modifying existing files: it accepts *** Begin Patch / *** Update File sections and standard unified diffs, and applies all hunks atomically. Do not use it for new files; use CreateNewFile/Write.",
+     parameters: {
+       type: "object",
+       required: ["patch"],
+diff --git a/core/tools/systemMessageTools/toolCodeblocks/index.ts b/core/tools/systemMessageTools/toolCodeblocks/index.ts
+index 44c8e6921..022368417 100644
+--- a/core/tools/systemMessageTools/toolCodeblocks/index.ts
++++ b/core/tools/systemMessageTools/toolCodeblocks/index.ts
+@@ -83,7 +83,10 @@ Do not mix planning narration with tool calls.`;
+ 8. If the user's request can be addressed with a listed tool, use it rather than guessing.
+ 9. Do not perform actions with hypothetical files. Use tools to find relevant files.
+ 10. Do not repeat the same tool call with the same arguments when it produces no new result.
+-11. Use prose only for clarification, a concise tool result summary, or the final answer.`;
++11. Use prose only for clarification, a concise tool result summary, or the final answer.
++12. Every required argument must be present. If a call is rejected for invalid or missing arguments, read the schema in the error, fix the arguments, and call it again. Never repeat the same invalid call.
++13. To modify existing files, prefer ApplyPatch (one atomic patch, multiple files). Use edit_existing_file for a small exact replacement and create_new_file only for a new file or a complete rewrite. Do not use run_terminal_command with sed, awk, cat, echo, tee or Python to modify project files.
++14. When you need a clarification, a preference or a decision from the user, call AskQuestion instead of writing a question in prose and ending the turn.`;
+ 
+   exampleDynamicToolDefinition = `
+ \`\`\`tool_definition
+diff --git a/core/tools/toolArgumentValidation.ts b/core/tools/toolArgumentValidation.ts
+new file mode 100644
+index 000000000..70742996a
+--- /dev/null
++++ b/core/tools/toolArgumentValidation.ts
+@@ -0,0 +1,159 @@
++import { Tool } from "..";
++
++export interface ToolArgumentIssue {
++  path: string;
++  message: string;
++}
++
++function isPlainObject(value: unknown): value is Record<string, any> {
++  return typeof value === "object" && value !== null && !Array.isArray(value);
++}
++
++function validateValue(
++  value: unknown,
++  schema: any,
++  path: string,
++  issues: ToolArgumentIssue[],
++): void {
++  if (!schema) return;
++
++  if (schema.type === "object") {
++    if (!isPlainObject(value)) {
++      issues.push({ path, message: "must be a JSON object" });
++      return;
++    }
++    for (const required of schema.required ?? []) {
++      if (value[required] === undefined || value[required] === null) {
++        issues.push({
++          path: path ? `${path}.${required}` : required,
++          message: "missing required parameter",
++        });
++      }
++    }
++    for (const [key, childSchema] of Object.entries(
++      schema.properties ?? {},
++    )) {
++      if (value[key] !== undefined && value[key] !== null) {
++        validateValue(
++          value[key],
++          childSchema,
++          path ? `${path}.${key}` : key,
++          issues,
++        );
++      }
++    }
++    return;
++  }
++
++  if (schema.type === "array") {
++    if (!Array.isArray(value)) {
++      issues.push({ path, message: "must be an array" });
++      return;
++    }
++    if (schema.items) {
++      value.forEach((item, index) =>
++        validateValue(item, schema.items, `${path}[${index}]`, issues),
++      );
++    }
++    return;
++  }
++
++  if (schema.type === "string" && typeof value !== "string") {
++    issues.push({ path, message: "must be a string" });
++  } else if (
++    (schema.type === "number" || schema.type === "integer") &&
++    typeof value !== "number"
++  ) {
++    issues.push({ path, message: "must be a number" });
++  } else if (schema.type === "boolean" && typeof value !== "boolean") {
++    issues.push({ path, message: "must be a boolean" });
++  }
++}
++
++export function validateToolArguments(
++  tool: Tool,
++  args: Record<string, any>,
++): ToolArgumentIssue[] {
++  const issues: ToolArgumentIssue[] = [];
++  validateValue(args, tool.function.parameters, "", issues);
++  return issues;
++}
++
++function sampleValue(name: string, schema: any): any {
++  if (schema?.enum?.length) return schema.enum[0];
++  switch (schema?.type) {
++    case "string": {
++      const samples: Record<string, string> = {
++        filepath: "path/to/file.ts",
++        file_path: "path/to/file.ts",
++        path: "path/to/file.ts",
++        old_string: "exact existing text",
++        new_string: "replacement text",
++        content: "file content",
++        command: "npm test",
++        pattern: "search pattern",
++        query: "search query",
++        patch:
++          "*** Begin Patch\n*** Update File: path/to/file.ts\n@@\n-old line\n+new line\n*** End Patch",
++        question: "question for the user",
++        url: "https://example.com",
++      };
++      return samples[name] ?? `<${name}>`;
++    }
++    case "number":
++    case "integer":
++      return 1;
++    case "boolean":
++      return false;
++    case "array":
++      return [sampleValue(name, schema.items ?? {})];
++    case "object": {
++      const value: Record<string, any> = {};
++      for (const key of schema.required ?? []) {
++        value[key] = sampleValue(key, schema.properties?.[key] ?? {});
++      }
++      return value;
++    }
++    default:
++      return `<${name}>`;
++  }
++}
++
++export function buildToolCallRejectionMessage(
++  tool: Tool,
++  args: Record<string, any>,
++  issues: ToolArgumentIssue[],
++): string {
++  const problemLines = issues
++    .map((issue) => `- ${issue.path}: ${issue.message}`)
++    .join("\n");
++  const required = tool.function.parameters?.required?.length
++    ? tool.function.parameters.required.join(", ")
++    : "none";
++  const example = {
++    name: tool.function.name,
++    arguments: sampleValue("arguments", {
++      type: "object",
++      properties: tool.function.parameters?.properties ?? {},
++      required: tool.function.parameters?.required ?? [],
++    }),
++  };
++
++  return [
++    `Tool call rejected before execution: "${tool.function.name}".`,
++    `Arguments received: ${JSON.stringify(args)}`,
++    "",
++    "Problems:",
++    problemLines || "- invalid arguments",
++    "",
++    `Required: ${required}`,
++    `Schema: ${JSON.stringify(tool.function.parameters)}`,
++    "",
++    "Correct example:",
++    "```tool",
++    JSON.stringify(example, null, 2),
++    "```",
++    "",
++    "Fix the arguments and call the tool again. Do not repeat the same invalid call.",
++  ].join("\n");
++}
+diff --git a/core/tools/toolArgumentValidation.vitest.ts b/core/tools/toolArgumentValidation.vitest.ts
+new file mode 100644
+index 000000000..8c23f5ffa
+--- /dev/null
++++ b/core/tools/toolArgumentValidation.vitest.ts
+@@ -0,0 +1,87 @@
++import { describe, expect, it } from "vitest";
++
++import { Tool } from "..";
++import {
++  buildToolCallRejectionMessage,
++  validateToolArguments,
++} from "./toolArgumentValidation";
++
++function tool(parameters: any): Tool {
++  return {
++    type: "function",
++    displayTitle: "Test",
++    wouldLikeTo: "",
++    isCurrently: "",
++    hasAlready: "",
++    readonly: false,
++    isInstant: true,
++    group: "built-in",
++    function: {
++      name: "TestTool",
++      description: "Test tool",
++      parameters,
++    },
++  } as Tool;
++}
++
++describe("validateToolArguments", () => {
++  it("reports missing top-level required parameters", () => {
++    const issues = validateToolArguments(
++      tool({
++        type: "object",
++        required: ["filepath"],
++        properties: { filepath: { type: "string" } },
++      }),
++      {},
++    );
++
++    expect(issues).toEqual([
++      { path: "filepath", message: "missing required parameter" },
++    ]);
++  });
++
++  it("reports missing required fields inside arrays", () => {
++    const issues = validateToolArguments(
++      tool({
++        type: "object",
++        required: ["edits"],
++        properties: {
++          edits: {
++            type: "array",
++            items: {
++              type: "object",
++              required: ["old_string", "new_string"],
++              properties: {
++                old_string: { type: "string" },
++                new_string: { type: "string" },
++              },
++            },
++          },
++        },
++      }),
++      { edits: [{ old_string: "a" }] },
++    );
++
++    expect(issues).toEqual([
++      { path: "edits[0].new_string", message: "missing required parameter" },
++    ]);
++  });
++
++  it("includes the schema and a concrete example in the rejection", () => {
++    const testTool = tool({
++      type: "object",
++      required: ["filepath"],
++      properties: { filepath: { type: "string" } },
++    });
++    const message = buildToolCallRejectionMessage(
++      testTool,
++      {},
++      validateToolArguments(testTool, {}),
++    );
++
++    expect(message).toContain("Tool call rejected before execution");
++    expect(message).toContain("Required: filepath");
++    expect(message).toContain('"filepath": "path/to/file.ts"');
++    expect(message).toContain("Do not repeat the same invalid call");
++  });
++});
+diff --git a/core/util/messageConversion.ts b/core/util/messageConversion.ts
+index 0e86e2109..6e268f791 100644
+--- a/core/util/messageConversion.ts
++++ b/core/util/messageConversion.ts
+@@ -361,6 +361,7 @@ export function convertFromUnifiedHistory(
+ export function convertFromUnifiedHistoryWithSystemMessage(
+   historyItems: ChatHistoryItem[],
+   systemMessage: string,
++  options?: { textToolMode?: boolean },
+ ): ChatCompletionMessageParam[] {
+   // OpenAI-compatible providers only accept a system message at the very
+   // beginning, and litellm rejects any payload where one appears later. The
+@@ -373,6 +374,62 @@ export function convertFromUnifiedHistoryWithSystemMessage(
+     (item) => item.message.role !== "system",
+   );
+ 
++  if (options?.textToolMode) {
++    // Text mode must stay a plain OpenAI chat: no tools parameter, no
++    // assistant.tool_calls and no role:"tool" messages. Some strict
++    // OpenAI-compatible proxies reject those synthetic native fields even
++    // though the model produced the call as text. Replay the assistant block
++    // as content and return results as user-visible tool_result blocks.
++    const messages: ChatCompletionMessageParam[] = [
++      { role: "system", content: systemMessage },
++    ];
++
++    for (const item of conversationHistory) {
++      if (item.message.role === "tool") {
++        continue;
++      }
++
++      for (const converted of convertFromUnifiedHistory([item])) {
++        if (converted.role === "tool") {
++          // The text-mode user tool_result below replaces native tool rows.
++          continue;
++        }
++        if (converted.role === "assistant") {
++          const { tool_calls: _toolCalls, ...plainAssistant } =
++            converted as any;
++          if (
++            plainAssistant.content !== undefined &&
++            plainAssistant.content !== null &&
++            (typeof plainAssistant.content !== "string" ||
++              plainAssistant.content.trim().length > 0)
++          ) {
++            messages.push(plainAssistant);
++          }
++        } else {
++          messages.push(converted);
++        }
++      }
++
++      if (item.message.role === "assistant" && item.toolCallStates?.length) {
++        const results = item.toolCallStates
++          .map((state) => {
++            const output =
++              state.output && state.output.length > 0
++                ? state.output.map((o: any) => o.content).join("\n")
++                : "Tool cancelled";
++            return `<tool_result tool="${state.toolCall.function.name}" id="${state.toolCallId}">\n${output}\n</tool_result>`;
++          })
++          .join("\n");
++        messages.push({
++          role: "user",
++          content: `Tool results:\n${results}`,
++        });
++      }
++    }
++
++    return messages;
++  }
++
+   return [
+     {
+       role: "system",
+diff --git a/extensions/cli/src/messageConversion.test.ts b/extensions/cli/src/messageConversion.test.ts
+index 46c4f4031..9f8d7e7b2 100644
+--- a/extensions/cli/src/messageConversion.test.ts
++++ b/extensions/cli/src/messageConversion.test.ts
+@@ -206,4 +206,54 @@ describe("convertFromUnifiedHistoryWithSystemMessage", () => {
+     });
+     expect(result[1]).toEqual({ role: "user", content: "Hello" });
+   });
++
++  it("replays text-mode tool calls without native tool_calls or tool roles", () => {
++    const historyItems: ChatHistoryItem[] = [
++      { message: { role: "user", content: "Read a.txt" }, contextItems: [] },
++      {
++        message: {
++          role: "assistant",
++          content:
++            '```tool\n{"name":"Read","arguments":{"filepath":"a.txt"}}\n```',
++        },
++        contextItems: [],
++        toolCallStates: [
++          {
++            toolCallId: "call_1",
++            toolCall: {
++              id: "call_1",
++              type: "function",
++              function: { name: "Read", arguments: '{"filepath":"a.txt"}' },
++            },
++            status: "done",
++            parsedArgs: { filepath: "a.txt" },
++            output: [
++              {
++                content: "alpha",
++                name: "Read result",
++                description: "",
++              },
++            ],
++          },
++        ] as any,
++      },
++    ];
++
++    const result = convertFromUnifiedHistoryWithSystemMessage(
++      historyItems,
++      "Current system prompt",
++      { textToolMode: true },
++    );
++
++    expect(result.map((message) => message.role)).toEqual([
++      "system",
++      "user",
++      "assistant",
++      "user",
++    ]);
++    expect(result[2]).not.toHaveProperty("tool_calls");
++    expect(String(result[3].content)).toContain('<tool_result tool="Read"');
++    expect(String(result[3].content)).toContain("alpha");
++    expect(result.some((message) => message.role === "tool")).toBe(false);
++  });
+ });
+diff --git a/extensions/cli/src/permissions/defaultPolicies.ts b/extensions/cli/src/permissions/defaultPolicies.ts
+index caeac927f..ba44fc061 100644
+--- a/extensions/cli/src/permissions/defaultPolicies.ts
++++ b/extensions/cli/src/permissions/defaultPolicies.ts
+@@ -10,6 +10,8 @@ export function getDefaultToolPolicies(
+   const policies: ToolPermissionPolicy[] = [
+     // Write tools
+     { tool: "Edit", permission: "ask" },
++    { tool: "ApplyPatch", permission: "ask" },
++    { tool: "ChangeDirectory", permission: "allow" },
+     { tool: "MultiEdit", permission: "ask" },
+     { tool: "Write", permission: "ask" },
+     { tool: "CheckBackgroundJob", permission: "allow" },
+@@ -21,7 +23,17 @@ export function getDefaultToolPolicies(
+     { tool: "Fetch", permission: "allow" }, // Technically not read only but edge casey to post w query params
+     { tool: "List", permission: "allow" },
+     { tool: "Read", permission: "allow" },
++    { tool: "ReadRange", permission: "allow" },
++    { tool: "ReadManyFiles", permission: "allow" },
++    { tool: "Glob", permission: "allow" },
+     { tool: "Search", permission: "allow" },
++    { tool: "GitStatus", permission: "allow" },
++    { tool: "GitDiff", permission: "allow" },
++    { tool: "GitLog", permission: "allow" },
++    { tool: "GetReferences", permission: "allow" },
++    { tool: "GetDefinition", permission: "allow" },
++    { tool: "SearchWorkspaceSymbols", permission: "allow" },
++    { tool: "DotnetProjects", permission: "allow" },
+     { tool: "Status", permission: "allow" },
+     { tool: "ReportFailure", permission: "allow" },
+     { tool: "UploadArtifact", permission: "allow" },
+@@ -42,6 +54,8 @@ export function getDefaultToolPolicies(
+ // Plan mode: Complete override - exclude all write operations, allow only reads and bash
+ export const PLAN_MODE_POLICIES: ToolPermissionPolicy[] = [
+   { tool: "Edit", permission: "exclude" },
++  { tool: "ApplyPatch", permission: "exclude" },
++  { tool: "ChangeDirectory", permission: "allow" },
+   { tool: "MultiEdit", permission: "exclude" },
+   { tool: "Write", permission: "exclude" },
+ 
+@@ -55,8 +69,18 @@ export const PLAN_MODE_POLICIES: ToolPermissionPolicy[] = [
+   { tool: "Fetch", permission: "allow" },
+   { tool: "List", permission: "allow" },
+   { tool: "Read", permission: "allow" },
++  { tool: "ReadRange", permission: "allow" },
++  { tool: "ReadManyFiles", permission: "allow" },
++  { tool: "Glob", permission: "allow" },
+   { tool: "ReportFailure", permission: "allow" },
+   { tool: "Search", permission: "allow" },
++  { tool: "GitStatus", permission: "allow" },
++  { tool: "GitDiff", permission: "allow" },
++  { tool: "GitLog", permission: "allow" },
++  { tool: "GetReferences", permission: "allow" },
++  { tool: "GetDefinition", permission: "allow" },
++  { tool: "SearchWorkspaceSymbols", permission: "allow" },
++  { tool: "DotnetProjects", permission: "allow" },
+   { tool: "Skills", permission: "allow" },
+   { tool: "Status", permission: "allow" },
+   { tool: "UploadArtifact", permission: "allow" },
+diff --git a/extensions/cli/src/services/MCPService.ts b/extensions/cli/src/services/MCPService.ts
+index 016f5bbde..c081af906 100644
+--- a/extensions/cli/src/services/MCPService.ts
++++ b/extensions/cli/src/services/MCPService.ts
+@@ -18,6 +18,7 @@ import {
+   MCPConnectionInfo,
+   MCPServerConfig,
+   MCPServiceState,
++  MCPTool,
+   SERVICE_NAMES,
+ } from "./types.js";
+ 
+@@ -41,6 +42,7 @@ export class MCPService
+   private isShuttingDown = false;
+   private isHeadless: boolean | undefined;
+   private apiKeyCache: Map<string, string> = new Map();
++  private connectionInit: Promise<unknown> = Promise.resolve();
+ 
+   getDependencies(): string[] {
+     return [SERVICE_NAMES.CONFIG, SERVICE_NAMES.AUTH];
+@@ -78,6 +80,7 @@ export class MCPService
+     });
+ 
+     const connectionInit = Promise.all(connectionPromises ?? []);
++    this.connectionInit = connectionInit;
+     if (isHeadless || hasAgentFile) {
+       await connectionInit;
+ 
+@@ -96,12 +99,27 @@ export class MCPService
+         }
+       }
+     } else {
++      // Do not block the TUI on slow MCP servers, but make the readiness
++      // promise available so the first LLM request can wait for their tools.
++      void connectionInit.finally(() => this.updateState());
+       this.updateState();
+     }
+ 
+     return this.currentState;
+   }
+ 
++  /**
++   * Wait until MCP servers have finished their first connection attempt.
++   * Returns after the timeout even if a server is still hanging; callers can
++   * then proceed with whatever tools are available.
++   */
++  async waitForConnections(timeoutMs = 8000): Promise<void> {
++    await Promise.race([
++      this.connectionInit.catch(() => undefined),
++      new Promise<void>((resolve) => setTimeout(resolve, timeoutMs)),
++    ]);
++  }
++
+   /**
+    * Update internal state based on current connections
+    */
+@@ -115,7 +133,10 @@ export class MCPService
+     const tools = connectedServers.flatMap((server) =>
+       server.tools.map((tool) => ({
+         ...tool,
+-        name: getToolNameFromMCPServer(server.name, tool.name),
++        name: getToolNameFromMCPServer(
++          (server.config as { name?: string })?.name ?? "mcp",
++          tool.name,
++        ),
+         originalName: tool.name,
+       })),
+     );
+@@ -190,16 +211,25 @@ export class MCPService
+   public async runTool(name: string, args: Record<string, any>) {
+     for (const connection of this.connections.values()) {
+       if (connection.status === "connected" && connection.client) {
+-        const tool = connection.tools.find((t) => t.name === name);
++        const tool = connection.tools.find(
++          (t) =>
++            getToolNameFromMCPServer(connection.config!.name, t.name) ===
++              name || t.name === name,
++        );
+         if (tool) {
+-          const serverName = connection.config!.name;
++          const serverName =
++            (connection.config as { name?: string })?.name ?? "mcp";
+           return await this.withTokenRefresh(serverName, async () => {
+             const conn = this.connections.get(serverName);
+             if (!conn?.client) {
+               throw new Error(`Client for ${serverName} not available`);
+             }
++            // The tool state exposes "server_tool" names; the MCP protocol
++            // needs the original tool name.
+             return await conn.client.callTool({
+-              name: (tool as MCPTool & { originalName?: string }).originalName ?? tool.name,
++              name:
++                (tool as MCPTool & { originalName?: string }).originalName ??
++                tool.name,
+               arguments: args,
+             });
+           });
+diff --git a/extensions/cli/src/session.ts b/extensions/cli/src/session.ts
+index 45f765a08..3e8b40bbd 100644
+--- a/extensions/cli/src/session.ts
++++ b/extensions/cli/src/session.ts
+@@ -125,6 +125,12 @@ class SessionManager {
+     saveSession();
+   }
+ 
++  updateWorkspaceDirectory(directory: string): void {
++    const session = this.getCurrentSession();
++    session.workspaceDirectory = directory;
++    saveSession();
++  }
++
+   clear(): void {
+     this.currentSession = null;
+     this.sessionUsage = {
+@@ -544,6 +550,14 @@ export function updateSessionTitle(title: string): void {
+   SessionManager.getInstance().updateTitle(title);
+ }
+ 
++/**
++ * Keep the session's recorded workspace in sync after /cd or the
++ * ChangeDirectory tool.
++ */
++export function updateSessionWorkspaceDirectory(directory: string): void {
++  SessionManager.getInstance().updateWorkspaceDirectory(directory);
++}
++
+ /**
+  * Get the current session
+  */
+diff --git a/extensions/cli/src/slashCommands.ts b/extensions/cli/src/slashCommands.ts
+index 95e0afa85..c153c028a 100644
+--- a/extensions/cli/src/slashCommands.ts
++++ b/extensions/cli/src/slashCommands.ts
+@@ -15,7 +15,7 @@ import { serviceContainer } from "./services/ServiceContainer.js";
+ import { services } from "./services/index.js";
+ import { SERVICE_NAMES } from "./services/types.js";
+ import { telemetryService } from "./telemetry/telemetryService.js";
+-import { changeWorkspace } from "./util/workspace.js";
++import { applyWorkspaceChange } from "./util/workspace.js";
+ import { buildImportSkillPrompt } from "./tools/skills.js";
+ import { SlashCommandResult } from "./ui/hooks/useChat.types.js";
+ import {
+@@ -274,13 +274,8 @@ function syncToolPermissionState(): void {
+ 
+ const commandHandlers: Record<string, CommandHandler> = {
+   help: handleHelp,
+-  cd: (args) => {
+-    const result = changeWorkspace(args.join(" "));
+-    if (result.success) {
+-      try {
+-        void services.fileIndex?.refreshIndex(true);
+-      } catch {}
+-    }
++  cd: async (args) => {
++    const result = await applyWorkspaceChange(args.join(" "));
+     return { output: result.message };
+   },
+   clear: () => {
+diff --git a/extensions/cli/src/stream/handleToolCalls.ts b/extensions/cli/src/stream/handleToolCalls.ts
+index 8f5b520af..4a82de741 100644
+--- a/extensions/cli/src/stream/handleToolCalls.ts
++++ b/extensions/cli/src/stream/handleToolCalls.ts
+@@ -182,6 +182,15 @@ export async function getRequestTools(isHeadless: boolean) {
+     return [];
+   }
+ 
++  // MCP connections start asynchronously in interactive mode. Wait briefly on
++  // the first request so the model sees MCP tools instead of an empty list
++  // while the server is still handshaking.
++  try {
++    await services.mcp?.waitForConnections?.(8000);
++  } catch {
++    // A slow or failed MCP server must not block normal built-in tools.
++  }
++
+   const availableTools = await getAllAvailableTools(isHeadless);
+ 
+   const allowedTools: Tool[] = [];
+diff --git a/extensions/cli/src/stream/streamChatResponse.helpers.ts b/extensions/cli/src/stream/streamChatResponse.helpers.ts
+index d87510521..391a64bfc 100644
+--- a/extensions/cli/src/stream/streamChatResponse.helpers.ts
++++ b/extensions/cli/src/stream/streamChatResponse.helpers.ts
+@@ -31,6 +31,10 @@ import {
+   validateToolCallArgsPresent,
+ } from "../tools/index.js";
+ import { PreprocessedToolCall, ToolCall } from "../tools/types.js";
++import {
++  buildToolCallRejectionMessage,
++  validateToolArguments,
++} from "../tools/validateToolArgs.js";
+ import { logger } from "../util/logger.js";
+ 
+ import { StreamCallbacks } from "./streamChatResponse.types.js";
+@@ -435,6 +439,16 @@ export async function preprocessStreamedToolCalls(
+         tool.parameters,
+       );
+ 
++      const argumentIssues = validateToolArguments(tool, toolCall.arguments);
++      if (argumentIssues.length > 0) {
++        throw new Error(
++          buildToolCallRejectionMessage(
++            tool,
++            toolCall.arguments,
++            argumentIssues,
++          ),
++        );
++      }
+       validateToolCallArgsPresent(toolCall, tool);
+ 
+       const preprocessedCall: PreprocessedToolCall = {
+diff --git a/extensions/cli/src/stream/streamChatResponse.ts b/extensions/cli/src/stream/streamChatResponse.ts
+index 7afb41a5f..658ff1abf 100644
+--- a/extensions/cli/src/stream/streamChatResponse.ts
++++ b/extensions/cli/src/stream/streamChatResponse.ts
+@@ -214,6 +214,7 @@ export async function processStreamingResponse(
+   const openaiChatHistory = convertFromUnifiedHistoryWithSystemMessage(
+     chatHistory,
+     systemMessage,
++    { textToolMode: toolMode === "text" },
+   ) as ChatCompletionMessageParam[];
+   const requestStartTime = Date.now();
+ 
+diff --git a/extensions/cli/src/stream/streamResilience.ts b/extensions/cli/src/stream/streamResilience.ts
+index dc241e6cb..e98f521c5 100644
+--- a/extensions/cli/src/stream/streamResilience.ts
++++ b/extensions/cli/src/stream/streamResilience.ts
+@@ -108,12 +108,14 @@ export class EmptyStreamError extends Error {
+     super(message);
+     this.name = "EmptyStreamError";
+   }
++}
+ 
+-  export class TruncatedStreamError extends Error {
+-    constructor(message: string = "Stream ended because finish_reason was length") {
+-      super(message);
+-      this.name = "TruncatedStreamError";
+-    }
++export class TruncatedStreamError extends Error {
++  constructor(
++    message: string = "Stream ended because finish_reason was length",
++  ) {
++    super(message);
++    this.name = "TruncatedStreamError";
+   }
+ }
+ 
+@@ -249,8 +251,7 @@ async function readAttemptChunks(
+     }
+     const chunk = chunkNext.value;
+     chunkCount++;
+-    const finishReason =
+-      (chunk as any)?.choices?.[0]?.finish_reason;
++    const finishReason = (chunk as any)?.choices?.[0]?.finish_reason;
+     if (finishReason === "length") {
+       state.finishReasonLength = true;
+     }
+@@ -427,20 +428,21 @@ export async function consumeStreamWithResilience(
+       state.sawThinking = false;
+ 
+       connectionPhase = true;
++      const streamRequest: any = {
++        model: model.model,
++        messages: attemptMessages,
++        stream: true,
++        ...getDefaultCompletionOptions(model.defaultCompletionOptions),
++      };
++      // Do not merely set tools: undefined. Some corporate proxies reject any
++      // request whose JSON contains a "tools" key, even an empty/undefined
++      // one. In text mode the tools are described in the system message.
++      if (nativeTools) {
++        streamRequest.tools = nativeTools;
++      }
+       const stream = await chatCompletionStreamWithBackoff(
+         llmApi,
+-        {
+-          model: model.model,
+-          messages: attemptMessages,
+-          stream: true,
+-          // In text tool mode the tools are described in the system message and
+-          // parsed from the reply - the native tools parameter must stay empty
+-          // so that strict OpenAI-compatible servers never see it. The same
+-          // applies whenever no tools are declared (chat mode): omit the
+-          // parameter instead of sending `tools: []`.
+-          tools: nativeTools,
+-          ...getDefaultCompletionOptions(model.defaultCompletionOptions),
+-        },
++        streamRequest,
+         abortController.signal,
+       );
+       connectionPhase = false;
+diff --git a/extensions/cli/src/systemMessage.ts b/extensions/cli/src/systemMessage.ts
+index 1cc93f6de..96ce2d1d0 100644
+--- a/extensions/cli/src/systemMessage.ts
++++ b/extensions/cli/src/systemMessage.ts
+@@ -52,6 +52,10 @@ Notes:
+ 3. When an available tool is the correct next action, execute it immediately. Do not announce that you are going to read, search, analyze, inspect, edit, or run a tool before issuing the call.
+ 4. Do not narrate planned tool actions or repeat them in prose. Use text for clarification, concise results, or the final answer.
+ 5. Do not repeat the same tool call with the same arguments when it produces no new information.
++6. To change the persistent working directory, use the ChangeDirectory tool. A \`cd\` inside Bash only affects that single command.
++7. To modify existing files, use ApplyPatch by default (it applies one atomic patch to one or more files). Use Edit/MultiEdit for a small exact replacement and Write only for a new file or a complete rewrite. Never use Bash, sed, awk, cat, echo, tee or Python to modify project files.
++8. Tool arguments must include every required parameter. If a tool call is rejected for invalid or missing arguments, read the schema in the error, fix the arguments, and call it again. Never repeat the same invalid call.
++9. When you need a clarification, a preference or a decision from the user, call AskQuestion instead of writing a question in prose and ending the turn. AskQuestion is the only way to get an interactive answer; keep it concise and provide options (empty options means free-form).
+ Here is useful information about the environment you are running in:
+ <env>
+ Working directory: ${process.cwd()}
+diff --git a/extensions/cli/src/tools/allBuiltIns.ts b/extensions/cli/src/tools/allBuiltIns.ts
+index dcd687b14..16037ea41 100644
+--- a/extensions/cli/src/tools/allBuiltIns.ts
++++ b/extensions/cli/src/tools/allBuiltIns.ts
+@@ -5,6 +5,7 @@ import { editTool } from "./edit.js";
+ import { exitTool } from "./exit.js";
+ import { fetchTool } from "./fetch.js";
+ import { applyPatchTool } from "./applyPatch.js";
++import { changeDirectoryTool } from "./changeDirectory.js";
+ import {
+   getDefinitionTool,
+   getReferencesTool,
+@@ -40,6 +41,7 @@ export const ALL_BUILT_IN_TOOLS = [
+   exitTool,
+   fetchTool,
+   applyPatchTool,
++  changeDirectoryTool,
+   getReferencesTool,
+   getDefinitionTool,
+   searchWorkspaceSymbolsTool,
+diff --git a/extensions/cli/src/tools/applyPatch.ts b/extensions/cli/src/tools/applyPatch.ts
+index 91797ff61..24226617b 100644
+--- a/extensions/cli/src/tools/applyPatch.ts
++++ b/extensions/cli/src/tools/applyPatch.ts
+@@ -42,9 +42,7 @@ function parseUnifiedPatch(patch: string): PatchFile[] {
+       if (next?.startsWith("+++ ")) {
+         const newPath = next.slice(4).trim();
+         const filepath =
+-          newPath === "/dev/null"
+-            ? oldPath
+-            : newPath.replace(/^a\/|^b\//, "");
++          newPath === "/dev/null" ? oldPath : newPath.replace(/^a\/|^b\//, "");
+         current = { filepath, body: [], unified: true };
+         files.push(current);
+         i++;
+@@ -92,9 +90,7 @@ function applyCustomHunks(source: string, body: string[]): string {
+     }
+     let index = -1;
+     for (let i = 0; i <= sourceLines.length - oldLines.length; i++) {
+-      if (
+-        oldLines.every((oldLine, j) => sourceLines[i + j] === oldLine)
+-      ) {
++      if (oldLines.every((oldLine, j) => sourceLines[i + j] === oldLine)) {
+         index = i;
+         break;
+       }
+@@ -127,7 +123,7 @@ export const applyPatchTool: Tool = {
+   name: "ApplyPatch",
+   displayName: "Apply Patch",
+   description:
+-    "Apply an atomic unified patch to one or more existing files.",
++    "Apply an atomic unified patch to one or more EXISTING files. Prefer this tool when modifying existing files: it supports the *** Begin Patch / *** Update File format and standard unified diffs, and applies all hunks atomically. Do not use it to create a new file; use Write instead.",
+   parameters: {
+     type: "object",
+     required: ["patch"],
+@@ -178,10 +174,7 @@ export const applyPatchTool: Tool = {
+       const oldContent = fs.readFileSync(resolved, "utf8");
+       let newContent: string;
+       if (file.unified) {
+-        const diffLines = applyUnifiedDiff(
+-          oldContent,
+-          file.body.join("\n"),
+-        );
++        const diffLines = applyUnifiedDiff(oldContent, file.body.join("\n"));
+         newContent = diffLines
+           .filter((line) => line.type !== "old")
+           .map((line) => line.line)
+diff --git a/extensions/cli/src/tools/builtInToolNames.ts b/extensions/cli/src/tools/builtInToolNames.ts
+index eac06694d..952816346 100644
+--- a/extensions/cli/src/tools/builtInToolNames.ts
++++ b/extensions/cli/src/tools/builtInToolNames.ts
+@@ -33,6 +33,7 @@ export const BUILT_IN_TOOL_NAMES = [
+   "GetDefinition",
+   "SearchWorkspaceSymbols",
+   "ApplyPatch",
++  "ChangeDirectory",
+   "DotnetProjects",
+   "DotnetBuild",
+   "DotnetTest",
+diff --git a/extensions/cli/src/tools/changeDirectory.ts b/extensions/cli/src/tools/changeDirectory.ts
+new file mode 100644
+index 000000000..e8b89e2b5
+--- /dev/null
++++ b/extensions/cli/src/tools/changeDirectory.ts
+@@ -0,0 +1,39 @@
++import { applyWorkspaceChange } from "../util/workspace.js";
++
++import { Tool } from "./types.js";
++
++export const changeDirectoryTool: Tool = {
++  name: "ChangeDirectory",
++  displayName: "Change Directory",
++  description:
++    "Change the persistent working directory for this session. Use this instead of `cd` in Bash: a cd inside Bash only affects that one command.",
++  parameters: {
++    type: "object",
++    required: ["path"],
++    properties: {
++      path: {
++        type: "string",
++        description:
++          "Directory to switch to. Supports absolute paths, relative paths and ~/.",
++      },
++    },
++  },
++  readonly: false,
++  isBuiltIn: true,
++  preprocess: async (args) => ({
++    args,
++    preview: [
++      {
++        type: "text",
++        content: `Will change the working directory to ${args.path}`,
++      },
++    ],
++  }),
++  run: async ({ path }: { path: string }): Promise<string> => {
++    const result = await applyWorkspaceChange(path);
++    if (!result.success || !result.path) {
++      throw new Error(result.message);
++    }
++    return `Working directory changed to ${result.path}`;
++  },
++};
+diff --git a/extensions/cli/src/tools/edit.test.ts b/extensions/cli/src/tools/edit.test.ts
+index d0b265f22..21850e5c2 100644
+--- a/extensions/cli/src/tools/edit.test.ts
++++ b/extensions/cli/src/tools/edit.test.ts
+@@ -39,6 +39,7 @@ describe("editTool", () => {
+     vi.mocked(fs.readFileSync).mockReturnValue(originalContent);
+     vi.mocked(fs.writeFileSync).mockImplementation(() => {});
+     vi.mocked(fs.realpathSync).mockImplementation((path) => path.toString());
++    (fs as any).statSync = vi.fn().mockReturnValue({ isFile: () => true });
+ 
+     // Setup utility mocks with proper return values
+     vi.mocked(calculateLinesOfCodeDiff).mockReturnValue({
+diff --git a/extensions/cli/src/tools/index.tsx b/extensions/cli/src/tools/index.tsx
+index 615cde07a..8a56a2fb0 100644
+--- a/extensions/cli/src/tools/index.tsx
++++ b/extensions/cli/src/tools/index.tsx
+@@ -24,6 +24,7 @@ import { editTool } from "./edit.js";
+ import { exitTool } from "./exit.js";
+ import { fetchTool } from "./fetch.js";
+ import { applyPatchTool } from "./applyPatch.js";
++import { changeDirectoryTool } from "./changeDirectory.js";
+ import {
+   getDefinitionTool,
+   getReferencesTool,
+@@ -87,6 +88,7 @@ const BASE_BUILTIN_TOOLS: Tool[] = [
+   runTerminalCommandTool,
+   fetchTool,
+   applyPatchTool,
++  changeDirectoryTool,
+   getReferencesTool,
+   getDefinitionTool,
+   searchWorkspaceSymbolsTool,
+diff --git a/extensions/cli/src/tools/multiEdit.test.ts b/extensions/cli/src/tools/multiEdit.test.ts
+index 1f6d9cfde..ae36a8591 100644
+--- a/extensions/cli/src/tools/multiEdit.test.ts
++++ b/extensions/cli/src/tools/multiEdit.test.ts
+@@ -46,6 +46,7 @@ describe("multiEditTool CLI specific", () => {
+     vi.mocked(fs.readFileSync).mockReturnValue(originalContent);
+     vi.mocked(fs.writeFileSync).mockImplementation(() => {});
+     vi.mocked(fs.realpathSync).mockImplementation((path) => path.toString());
++    (fs as any).statSync = vi.fn().mockReturnValue({ isFile: () => true });
+ 
+     // Setup utility mocks with proper return values
+     vi.mocked(calculateLinesOfCodeDiff).mockReturnValue({
+diff --git a/extensions/cli/src/tools/readFile.ts b/extensions/cli/src/tools/readFile.ts
+index 8400c7a74..b33a56458 100644
+--- a/extensions/cli/src/tools/readFile.ts
++++ b/extensions/cli/src/tools/readFile.ts
+@@ -52,17 +52,20 @@ export function isTextVisibleForEdit(
+   filePath: string,
+   text: string,
+ ): boolean {
+-  if (fs.existsSync(filePath) && fs.statSync(filePath).isFile()) {
+-    if (!text) {
+-      return true;
+-    }
+-    const currentContent = fs.readFileSync(filePath, "utf-8");
+-    if (!currentContent.includes(text)) {
+-      return false;
+-    }
+-  } else {
++  let isFile = false;
++  try {
++    isFile = fs.existsSync(filePath) && fs.statSync(filePath).isFile();
++  } catch {
++    // The file may have been deleted or replaced between existsSync and
++    // statSync (common with editors and atomic saves).
++    return false;
++  }
++  if (!isFile) {
+     return false;
+   }
++  if (!text) {
++    return true;
++  }
+   if (!text) {
+     return readFilesSet.has(filePath) || (readFileRanges.get(filePath)?.length ?? 0) > 0;
+   }
+diff --git a/extensions/cli/src/tools/runTerminalCommand.ts b/extensions/cli/src/tools/runTerminalCommand.ts
+index 6b640c6a1..617d6e5f5 100644
+--- a/extensions/cli/src/tools/runTerminalCommand.ts
++++ b/extensions/cli/src/tools/runTerminalCommand.ts
+@@ -122,7 +122,9 @@ export const runTerminalCommandTool: Tool = {
+ 
+ Commands are automatically executed from the current working directory (${process.cwd()}), so there's no need to change directories with 'cd' commands.
+ 
+-IMPORTANT: To edit files, use Edit/MultiEdit tools instead of bash commands (sed, awk, etc).
++IMPORTANT:
++- To edit files, use ApplyPatch, Edit, MultiEdit or Write. Never use bash commands such as sed, awk, cat >, echo >, tee or a Python script to modify project files.
++- A 'cd' inside a Bash command only affects that single command. Use the ChangeDirectory tool to change the persistent working directory.
+ `,
+   parameters: {
+     type: "object",
+diff --git a/extensions/cli/src/tools/searchCode.test.ts b/extensions/cli/src/tools/searchCode.test.ts
+index 81558d83c..076a56366 100644
+--- a/extensions/cli/src/tools/searchCode.test.ts
++++ b/extensions/cli/src/tools/searchCode.test.ts
+@@ -11,7 +11,7 @@ const execMock: any = vi.fn();
+     });
+   });
+ 
+-vi.mock("child_process", () => ({ exec: execMock }));
++vi.mock("child_process", () => ({ exec: execMock, execFile: execMock }));
+ 
+ // Since we want to test just the interface and not the internals,
+ // let's create a simplified version of the run function to test the truncation logic
+diff --git a/extensions/cli/src/tools/searchCode.ts b/extensions/cli/src/tools/searchCode.ts
+index 1b940a2b9..bee5dd508 100644
+--- a/extensions/cli/src/tools/searchCode.ts
++++ b/extensions/cli/src/tools/searchCode.ts
+@@ -57,17 +57,15 @@ async function searchWithRipgrep(
+   filePattern?: string,
+   options?: SearchOptions,
+ ) {
+-  const args = [
+-    "--line-number",
+-    "--with-filename",
+-    "--color",
+-    "never",
+-  ];
++  const args = ["--line-number", "--with-filename", "--color", "never"];
+   args.push(pattern);
+   if (filePattern) {
+     args.push("-g", filePattern);
+   }
+-  if (options?.caseSensitive === false || options?.caseSensitive === undefined) {
++  if (
++    options?.caseSensitive === false ||
++    options?.caseSensitive === undefined
++  ) {
+     args.push("-i");
+   }
+   if (options?.fixedStrings) {
+@@ -105,14 +103,11 @@ async function searchWithGrepOrFindstr(
+   const ignorePatterns = await getGitignorePatterns();
+   if (isWindows) {
+     const fileSpec = filePattern ? filePattern : "*";
+-    const { stdout, stderr } = await execFilePromise("findstr", [
+-      "/S",
+-      "/N",
+-      "/P",
+-      "/R",
+-      pattern,
+-      fileSpec,
+-    ], { cwd: searchPath });
++    const { stdout, stderr } = await execFilePromise(
++      "findstr",
++      ["/S", "/N", "/P", "/R", pattern, fileSpec],
++      { cwd: searchPath },
++    );
+     return { stdout, stderr };
+   } else {
+     const args = ["-R", "-n", "-H", "-I"];
+@@ -122,15 +117,22 @@ async function searchWithGrepOrFindstr(
+ 
+     function matchesGlobPattern(relPath: string, pattern: string): boolean {
+       try {
+-        return minimatch(relPath.replace(/\\/g, "/"), pattern.replace(/^\.\//, ""), {
+-          dot: true,
+-        });
++        return minimatch(
++          relPath.replace(/\\/g, "/"),
++          pattern.replace(/^\.\//, ""),
++          {
++            dot: true,
++          },
++        );
+       } catch {
+         return relPath.includes(pattern);
+       }
+     }
+ 
+-    function isExcludedPath(relPath: string, exclusions: string[] = []): boolean {
++    function isExcludedPath(
++      relPath: string,
++      exclusions: string[] = [],
++    ): boolean {
+       const normalized = relPath.replace(/\\/g, "/");
+       const defaults = [
+         ".git/",
+@@ -202,16 +204,15 @@ async function searchWithGrepOrFindstr(
+         for (const entry of entries) {
+           if (totalMatches >= totalLimit) break;
+           const abs = path.join(dir, entry.name);
+-          const rel = relBase
+-            ? `${relBase}/${entry.name}`
+-            : entry.name;
++          const rel = relBase ? `${relBase}/${entry.name}` : entry.name;
+           if (entry.isDirectory()) {
+             if (!isExcludedPath(`${rel}/`, options.exclude)) {
+               walk(abs, rel);
+             }
+           } else if (entry.isFile()) {
+             if (isExcludedPath(rel, options.exclude)) continue;
+-            if (options.glob && !matchesGlobPattern(rel, options.glob)) continue;
++            if (options.glob && !matchesGlobPattern(rel, options.glob))
++              continue;
+             let content: string;
+             try {
+               const stat = fs.statSync(abs);
+@@ -240,7 +241,8 @@ async function searchWithGrepOrFindstr(
+                   outputLines.push(`${n + 1}:${lines[n]}`);
+                 }
+               }
+-              if (fileMatches >= perFileLimit || totalMatches >= totalLimit) break;
++              if (fileMatches >= perFileLimit || totalMatches >= totalLimit)
++                break;
+             }
+             if (fileMatches > 0) {
+               fileSections.push(rel);
+@@ -319,8 +321,7 @@ export const searchCodeTool: Tool = {
+       },
+       exclude: {
+         type: "array",
+-        description:
+-          "Optional glob patterns to exclude, such as '**/bin/**'",
++        description: "Optional glob patterns to exclude, such as '**/bin/**'",
+         items: {
+           type: "string",
+           description: "Exclusion glob",
+@@ -425,10 +426,13 @@ export const searchCodeTool: Tool = {
+         stdout = results.stdout;
+         stderr = results.stderr;
+       } else {
+-        const results = await searchWithNode(
++        // No ripgrep: use the native grep/findstr fallback. The old
++        // searchWithNode helper was accidentally nested inside another
++        // function and could never be called here.
++        const results = await searchWithGrepOrFindstr(
+           args.pattern,
+           searchPath,
+-          options,
++          args.file_pattern ?? args.glob,
+         );
+         stdout = results.stdout;
+         stderr = results.stderr;
+diff --git a/extensions/cli/src/tools/textToolMode.test.ts b/extensions/cli/src/tools/textToolMode.test.ts
+index cb1d688fd..766b7936d 100644
+--- a/extensions/cli/src/tools/textToolMode.test.ts
++++ b/extensions/cli/src/tools/textToolMode.test.ts
+@@ -157,7 +157,9 @@ END_ARG
+ 
+   it("detects an announcement that omitted the tool block", () => {
+     expect(
+-      looksLikeToolAnnouncement("I will read the file and inspect its contents."),
++      looksLikeToolAnnouncement(
++        "I will read the file and inspect its contents.",
++      ),
+     ).toBe(true);
+     expect(looksLikeToolAnnouncement("The answer is 42.")).toBe(false);
+   });
+@@ -183,9 +185,10 @@ describe("buildTextToolsInstructions", () => {
+     ]);
+ 
+     expect(instructions).toContain('language identifier "tool"');
+-    expect(instructions).toContain("**read_file**");
++    expect(instructions).toContain("### read_file");
+     expect(instructions).toContain("Reads the contents of a file");
+     expect(instructions).toContain("Required: filepath");
++    expect(instructions).toContain('"filepath": "path/to/file.ts"');
+     expect(instructions).toContain("```tool");
+   });
+ 
+diff --git a/extensions/cli/src/tools/textToolMode.ts b/extensions/cli/src/tools/textToolMode.ts
+index 8a853993c..786e1ebd7 100644
+--- a/extensions/cli/src/tools/textToolMode.ts
++++ b/extensions/cli/src/tools/textToolMode.ts
+@@ -45,6 +45,137 @@ export interface ChatCompletionToolLike {
+   };
+ }
+ 
++const TOOL_PRIORITY = [
++  "ApplyPatch",
++  "Read",
++  "ReadRange",
++  "ReadManyFiles",
++  "List",
++  "Glob",
++  "Search",
++  "GetReferences",
++  "GetDefinition",
++  "SearchWorkspaceSymbols",
++  "GitStatus",
++  "GitDiff",
++  "GitLog",
++  "ChangeDirectory",
++  "Write",
++  "Edit",
++  "MultiEdit",
++  "Bash",
++  "Fetch",
++  "ViewDiff",
++  "Checklist",
++  "AskQuestion",
++  "CheckBackgroundJob",
++];
++
++const SAMPLE_VALUES: Record<string, string> = {
++  filepath: "path/to/file.ts",
++  file_path: "path/to/file.ts",
++  path: "path/to/file.ts",
++  old_string: "exact existing text to replace",
++  new_string: "replacement text",
++  content: "file content",
++  command: "npm test",
++  pattern: "TODO",
++  query: "search query",
++  url: "https://example.com",
++  patch:
++    "*** Begin Patch\n*** Update File: path/to/file.ts\n@@\n-old line\n+new line\n*** End Patch",
++  prompt: "question for the user",
++  question: "question for the user",
++  title: "title",
++  directory: "path/to/directory",
++  target: "path/to/target",
++  project: "path/to/project.csproj",
++  task_id: "task-id",
++  job_id: "job-id",
++};
++
++function sampleStringForArgument(name: string, schema: any): string {
++  if (schema?.enum?.length) {
++    return String(schema.enum[0]);
++  }
++  if (SAMPLE_VALUES[name]) {
++    return SAMPLE_VALUES[name];
++  }
++  if (/url/i.test(name)) return "https://example.com";
++  if (/(path|file|dir)/i.test(name)) return "path/to/file.ts";
++  if (/(pattern|query|search)/i.test(name)) return "search text";
++  if (/(content|text|body|patch)/i.test(name)) return `sample ${name}`;
++  return `<${name}>`;
++}
++
++function sampleValueForSchema(name: string, schema: any): any {
++  if (schema?.enum?.length) {
++    return schema.enum[0];
++  }
++  switch (schema?.type) {
++    case "string":
++      return sampleStringForArgument(name, schema);
++    case "number":
++    case "integer":
++      return 1;
++    case "boolean":
++      return false;
++    case "array":
++      return [sampleValueForSchema(name, schema.items ?? {})];
++    case "object": {
++      const properties = schema.properties ?? {};
++      const required = schema.required ?? Object.keys(properties);
++      const value: Record<string, any> = {};
++      for (const key of required) {
++        value[key] = sampleValueForSchema(key, properties[key] ?? {});
++      }
++      return value;
++    }
++    default:
++      return `<${name}>`;
++  }
++}
++
++export function buildToolArgumentExample(parameters: any): Record<string, any> {
++  return sampleValueForSchema("arguments", {
++    type: "object",
++    properties: parameters?.properties ?? {},
++    required: parameters?.required ?? [],
++  });
++}
++
++export function buildToolCallExample(tool: TextToolDescription): string {
++  return JSON.stringify(
++    {
++      name: tool.name,
++      arguments: buildToolArgumentExample(tool.parameters),
++    },
++    null,
++    2,
++  );
++}
++
++function formatParameterDocs(parameters: any): string {
++  const properties = parameters?.properties;
++  if (!properties || Object.keys(properties).length === 0) {
++    return "- (no parameters)";
++  }
++  const required = new Set<string>(parameters?.required ?? []);
++  return Object.entries(properties)
++    .map(([key, schema]: [string, any]) => {
++      const type = schema?.type
++        ? ` (${schema.type}${required.has(key) ? ", required" : ", optional"})`
++        : "";
++      const description = schema?.description ? `: ${schema.description}` : "";
++      const nested =
++        schema?.type === "array" && schema.items
++          ? `\n    Item schema: ${JSON.stringify(schema.items)}`
++          : "";
++      return `- \`${key}\`${type}${description}${nested}`;
++    })
++    .join("\n");
++}
++
+ /**
+  * Builds the system message section that describes how to call tools in
+  * text mode. Mirrors the semantics of the GUI's system-message tools
+@@ -57,34 +188,40 @@ export function buildTextToolsInstructions(
+     return "";
+   }
+ 
+-  const toolDocs = tools
++  const priority = new Map(TOOL_PRIORITY.map((name, index) => [name, index]));
++  const sortedTools = [...tools].sort((a, b) => {
++    const aIndex = priority.get(a.name) ?? TOOL_PRIORITY.length;
++    const bIndex = priority.get(b.name) ?? TOOL_PRIORITY.length;
++    return aIndex - bIndex || a.name.localeCompare(b.name);
++  });
++
++  const toolDocs = sortedTools
+     .map((tool) => {
+-      const params = tool.parameters?.properties
+-        ? Object.entries(tool.parameters.properties)
+-            .map(
+-              ([key, schema]: [string, any]) =>
+-                `- ${key}${schema?.type ? ` (${schema.type})` : ""}${schema?.description ? `: ${schema.description}` : ""}`,
+-            )
+-            .join("\n")
+-        : "- (no parameters)";
+       const required = tool.parameters?.required?.length
+-        ? `\n  Required: ${tool.parameters.required.join(", ")}`
+-        : "";
+-      return `- **${tool.name}**: ${tool.description}\n  Parameters:\n${params}${required}`;
++        ? `Required: ${tool.parameters.required.join(", ")}`
++        : "Required: none";
++      return `### ${tool.name}
++${tool.description}
++
++${required}
++Parameters:
++${formatParameterDocs(tool.parameters)}
++
++Example:
++\`\`\`${TEXT_TOOL_FENCE}
++${buildToolCallExample(tool)}
++\`\`\``;
+     })
+     .join("\n\n");
+ 
+-  const example = JSON.stringify({
+-    name: tools[0].name,
+-    arguments: {},
+-  });
++  const example = buildToolCallExample(sortedTools[0]);
+ 
+   return `
+ 
+ <context name="toolCalling">
+-# Tool calling
++# Tool calling (text mode)
+ 
+-Native tool calling is disabled for this session. You call tools by writing
++Native function calling is disabled for this session. You call tools by writing
+ ONE fenced code block per tool call, with the language identifier "${TEXT_TOOL_FENCE}",
+ and a single JSON object as the body:
+ 
+@@ -92,20 +229,48 @@ and a single JSON object as the body:
+ ${example}
+ \`\`\`
+ 
+-Rules:
+-- Exactly one JSON object per code block, with "name" (string) and "arguments" (object).
+-- Multiple tool calls: write several code blocks; they run in the order written.
+-- Do not wrap tool calls in any other text structure; do not put them inside other code blocks.
+-- Execute the tool call immediately: do not first write "I will read", "I will search",
+-  "I will analyze", or similar narration.
+-- Do not describe a planned tool call and then call the tool. Use prose only for
+-  clarification, results, or the final answer.
+-- Do not repeat the same call with the same arguments unless new information may change
+-  the result.
+-- After each call you will receive the result and can continue.
+-- If you do not need a tool, simply answer normally without any "${TEXT_TOOL_FENCE}" block.
+-
+-Available tools:
++## Tool selection rules
++
++- Read before editing: use \`Read\`, \`ReadRange\`, \`ReadManyFiles\`, \`List\`,
++  \`Glob\` or \`Search\` to inspect the workspace.
++- **To modify existing files, use \`ApplyPatch\` by default.** It applies one
++  atomic patch to one or more files and is the Continue equivalent of
++  \`apply_patch\`. Use \`Edit\`/\`MultiEdit\` only for a small exact replacement
++  when writing a patch is awkward. Use \`Write\` only for a new file or a
++  complete rewrite.
++- Never use \`Bash\` with \`sed\`, \`awk\`, \`cat >\`, \`echo >\`, \`tee\`,
++  PowerShell redirection or a Python script to read or modify project files.
++  \`Bash\` is for builds, tests, git, package managers and commands that have
++  no dedicated tool.
++- Use \`ChangeDirectory\` to change the persistent working directory. A \`cd\`
++  inside \`Bash\` only affects that single command.
++- If a task needs several files, prefer one \`ReadManyFiles\` or one
++  \`ApplyPatch\` call over many one-by-one calls.
++- When you need a clarification, a preference or a decision from the user,
++  call \`AskQuestion\`. Do not write a question as prose and end the turn:
++  \`AskQuestion\` is how you get an interactive answer. Keep the question short
++  and provide concise options (use an empty options array for free-form input).
++
++## Protocol rules
++
++- Exactly one JSON object per block, with "name" (string) and "arguments" (object).
++- \`arguments\` MUST contain every parameter listed as **required**. A call with
++  a missing required parameter is rejected before execution.
++- Use a JSON object for \`arguments\`, never a JSON string.
++- Multiple tool calls: write several blocks; they run in the order written.
++- Do not put tool calls inside other code blocks or XML tags.
++- Execute the tool call immediately. Do not write "I will read...", "I will
++  search...", "Je vais..." or similar narration before the block.
++- Use prose only for clarification, completed results, or the final answer.
++- If a tool result starts with \`Tool call rejected\` or \`Invalid arguments\`,
++  read the required schema, fix the arguments, and call the tool again. Never
++  repeat the same invalid call.
++- Do not repeat the same call with the same arguments unless the result may
++  have changed.
++- After each call you receive the result and can continue. If no tool is
++  needed, answer normally without a "${TEXT_TOOL_FENCE}" block.
++
++## Available tools
+ 
+ ${toolDocs}
+ </context>
+@@ -126,10 +291,7 @@ export function extractToolCallsFromText(
+   const seen = new Set<string>();
+   const allowedNames = Array.from(allowedToolNames);
+ 
+-  const addToolCall = (
+-    rawName: string,
+-    rawArguments: Record<string, any>,
+-  ) => {
++  const addToolCall = (rawName: string, rawArguments: Record<string, any>) => {
+     const name =
+       resolveToolName(rawName, allowedNames) ??
+       (allowedToolNames.has(rawName) ? rawName : undefined);
+@@ -150,6 +312,41 @@ export function extractToolCallsFromText(
+     });
+   };
+ 
++  const addFromParsed = (parsed: any) => {
++    const name =
++      typeof parsed?.name === "string"
++        ? parsed.name
++        : typeof parsed?.tool_name === "string"
++          ? parsed.tool_name
++          : typeof parsed?.toolName === "string"
++            ? parsed.toolName
++            : typeof parsed?.tool === "string"
++              ? parsed.tool
++              : typeof parsed?.function === "string"
++                ? parsed.function
++                : undefined;
++    if (!name) {
++      return;
++    }
++
++    let args =
++      parsed?.arguments ?? parsed?.args ?? parsed?.parameters ?? parsed?.params;
++    if (typeof args === "string") {
++      try {
++        args = JSON.parse(args);
++      } catch {
++        args = {};
++      }
++    }
++    if (args === null || args === undefined) {
++      args = {};
++    }
++    if (typeof args !== "object" || Array.isArray(args)) {
++      return;
++    }
++    addToolCall(name, args);
++  };
++
+   const fenceRegex = /```([^\n`]*)\n([\s\S]*?)```/g;
+ 
+   let match: RegExpExecArray | null;
+@@ -161,13 +358,13 @@ export function extractToolCallsFromText(
+     }
+ 
+     if (info === "tool" && /(?:tool_name|tool_name:|TOOL_NAME)/i.test(body)) {
+-      const nameMatch =
+-        body.match(/(?:TOOL_NAME|tool_name)\s*:?\s*\n?\s*([^\n]+)/i);
++      const nameMatch = body.match(
++        /(?:TOOL_NAME|tool_name)\s*:?\s*\n?\s*([^\n]+)/i,
++      );
+       if (nameMatch?.[1]) {
+         const name = nameMatch[1].trim();
+         const args: Record<string, any> = {};
+-        const argRegex =
+-          /BEGIN_ARG:\s*([^\n]+)\n([\s\S]*?)\nEND_ARG/gi;
++        const argRegex = /BEGIN_ARG:\s*([^\n]+)\n([\s\S]*?)\nEND_ARG/gi;
+         let argMatch: RegExpExecArray | null;
+         while ((argMatch = argRegex.exec(body)) !== null) {
+           const key = argMatch[1].trim();
+@@ -190,41 +387,27 @@ export function extractToolCallsFromText(
+       continue;
+     }
+ 
+-    const name =
+-      typeof parsed?.name === "string"
+-        ? parsed.name
+-        : typeof parsed?.tool_name === "string"
+-          ? parsed.tool_name
+-          : typeof parsed?.toolName === "string"
+-            ? parsed.toolName
+-            : typeof parsed?.tool === "string"
+-              ? parsed.tool
+-              : typeof parsed?.function === "string"
+-                ? parsed.function
+-                : undefined;
+-    if (!name) {
+-      continue;
+-    }
++    addFromParsed(parsed);
++  }
+ 
+-    let args =
+-      parsed?.arguments ??
+-      parsed?.args ??
+-      parsed?.parameters ??
+-      parsed?.params;
+-    if (typeof args === "string") {
+-      try {
+-        args = JSON.parse(args);
+-      } catch {
+-        args = {};
+-      }
+-    }
+-    if (args === null || args === undefined) {
+-      args = {};
++  // Some models omit the fence entirely and return only the JSON object.
++  const bareJson = content.trim();
++  if (bareJson.startsWith("{") && bareJson.endsWith("}")) {
++    try {
++      addFromParsed(JSON.parse(bareJson));
++    } catch {
++      // Not a single JSON object; ignore.
+     }
+-    if (typeof args !== "object" || Array.isArray(args)) {
+-      continue;
++  }
++
++  // Legacy Continue format: <tool>{"name": "...", "arguments": {...}}</tool>
++  const legacyToolRegex = /<tool>([\s\S]*?)<\/tool>/gi;
++  for (const match of content.matchAll(legacyToolRegex)) {
++    try {
++      addFromParsed(JSON.parse((match[1] ?? "").trim()));
++    } catch {
++      // Ignore malformed legacy blocks.
+     }
+-    addToolCall(name, args);
+   }
+ 
+   // Fallback for models that ignore the fence instruction and emit their
+@@ -243,13 +426,11 @@ export function extractToolCallsFromText(
+ 
+   // VS Code/system-tool style and weaker providers sometimes emit the
+   // TOOL_NAME/BEGIN_ARG format without a surrounding fence.
+-  const bareToolRegex =
+-    /(?:^|\n)TOOL_NAME:\s*([^\n]+)[\s\S]*?(?:```|$)/gi;
++  const bareToolRegex = /(?:^|\n)TOOL_NAME:\s*([^\n]+)[\s\S]*?(?:```|$)/gi;
+   for (const match of content.matchAll(bareToolRegex)) {
+     const name = match[1].trim();
+     const args: Record<string, any> = {};
+-    const argRegex =
+-      /BEGIN_ARG:\s*([^\n]+)\n([\s\S]*?)\nEND_ARG/gi;
++    const argRegex = /BEGIN_ARG:\s*([^\n]+)\n([\s\S]*?)\nEND_ARG/gi;
+     let argMatch: RegExpExecArray | null;
+     while ((argMatch = argRegex.exec(match[0])) !== null) {
+       const key = argMatch[1].trim();
+@@ -276,5 +457,7 @@ export function looksLikeToolAnnouncement(content: string): boolean {
+     /\b(i(?:'|’)ll|i will|i'm going to|i am going to|let me|i need to|i should|i have to|next i(?:'|’)ll|je vais|je dois|je vais devoir|j'utilise|je vais utiliser)\b/i;
+   const actionWords =
+     /\b(read|search|inspect|analyze|analyse|edit|modify|run|grep|glob|list|check|fetch|open)\w*\b/i;
+-  return announcements.test(lower) || (actionWords.test(lower) && lower.length < 600);
++  return (
++    announcements.test(lower) || (actionWords.test(lower) && lower.length < 600)
++  );
+ }
+diff --git a/extensions/cli/src/tools/types.ts b/extensions/cli/src/tools/types.ts
+index 612bd22ff..6b270e484 100644
+--- a/extensions/cli/src/tools/types.ts
++++ b/extensions/cli/src/tools/types.ts
+@@ -8,6 +8,7 @@ export interface ParameterSchema {
+   properties?: Record<string, ParameterSchema>;
+   items?: {
+     type: string;
++    description?: string;
+     properties?: Record<string, ParameterSchema>;
+     required?: string[];
+   };
+diff --git a/extensions/cli/src/tools/validateToolArgs.ts b/extensions/cli/src/tools/validateToolArgs.ts
+new file mode 100644
+index 000000000..a237656a6
+--- /dev/null
++++ b/extensions/cli/src/tools/validateToolArgs.ts
+@@ -0,0 +1,118 @@
++import { buildToolCallExample } from "./textToolMode.js";
++import { Tool } from "./types.js";
++
++export interface ToolArgumentIssue {
++  path: string;
++  message: string;
++}
++
++function isPlainObject(value: unknown): value is Record<string, any> {
++  return typeof value === "object" && value !== null && !Array.isArray(value);
++}
++
++function validateValue(
++  value: unknown,
++  schema: any,
++  path: string,
++  issues: ToolArgumentIssue[],
++): void {
++  if (!schema) {
++    return;
++  }
++
++  const expectedType = schema.type;
++  if (expectedType === "object") {
++    if (!isPlainObject(value)) {
++      issues.push({ path, message: "must be a JSON object" });
++      return;
++    }
++    const properties = schema.properties ?? {};
++    for (const required of schema.required ?? []) {
++      if (value[required] === undefined || value[required] === null) {
++        issues.push({
++          path: path ? `${path}.${required}` : required,
++          message: "missing required parameter",
++        });
++      }
++    }
++    for (const [key, childSchema] of Object.entries(properties)) {
++      if (value[key] !== undefined && value[key] !== null) {
++        validateValue(
++          value[key],
++          childSchema,
++          path ? `${path}.${key}` : key,
++          issues,
++        );
++      }
++    }
++    return;
++  }
++
++  if (expectedType === "array") {
++    if (!Array.isArray(value)) {
++      issues.push({ path, message: "must be an array" });
++      return;
++    }
++    if (schema.items) {
++      value.forEach((item, index) =>
++        validateValue(item, schema.items, `${path}[${index}]`, issues),
++      );
++    }
++    return;
++  }
++
++  if (expectedType === "string" && typeof value !== "string") {
++    issues.push({ path, message: "must be a string" });
++  } else if (
++    (expectedType === "number" || expectedType === "integer") &&
++    typeof value !== "number"
++  ) {
++    issues.push({ path, message: "must be a number" });
++  } else if (expectedType === "boolean" && typeof value !== "boolean") {
++    issues.push({ path, message: "must be a boolean" });
++  }
++}
++
++export function validateToolArguments(
++  tool: Tool,
++  args: Record<string, any>,
++): ToolArgumentIssue[] {
++  const issues: ToolArgumentIssue[] = [];
++  validateValue(args, tool.parameters, "", issues);
++  return issues;
++}
++
++export function buildToolCallRejectionMessage(
++  tool: Tool,
++  args: Record<string, any>,
++  issues: ToolArgumentIssue[],
++): string {
++  const problemLines = issues
++    .map((issue) => `- ${issue.path}: ${issue.message}`)
++    .join("\n");
++  const required = tool.parameters.required?.length
++    ? tool.parameters.required.join(", ")
++    : "none";
++
++  return [
++    `Tool call rejected before execution: "${tool.name}".`,
++    `Arguments received: ${JSON.stringify(args)}`,
++    "",
++    "Problems:",
++    problemLines || "- invalid arguments",
++    "",
++    `Required: ${required}`,
++    `Schema: ${JSON.stringify(tool.parameters)}`,
++    "",
++    "Correct example:",
++    "```tool",
++    buildToolCallExample({
++      name: tool.name,
++      description: tool.description,
++      parameters: tool.parameters,
++    }),
++    "```",
++    "",
++    "Fix the arguments and call the tool again. Do not repeat the same invalid call.",
++  ].join("\n");
++}
+diff --git a/extensions/cli/src/ui/__tests__/TUIChat.planModeBug.test.tsx b/extensions/cli/src/ui/__tests__/TUIChat.planModeBug.test.tsx
+index 90d5fedf9..e5b8c5d61 100644
+--- a/extensions/cli/src/ui/__tests__/TUIChat.planModeBug.test.tsx
++++ b/extensions/cli/src/ui/__tests__/TUIChat.planModeBug.test.tsx
+@@ -42,7 +42,7 @@ describe("TUIChat - Plan Mode Bug Reproduction", () => {
+       frame = lastFrame();
+ 
+       // c) Make sure the string "[plan]" is on the screen
+-      expect(frame!).toContain("plan]");
++      expect(frame!).toContain("plan");
+ 
+       // d) Successfully send a message without error
+       const testMessage = "Can you help me analyze this code?";
+@@ -59,7 +59,7 @@ describe("TUIChat - Plan Mode Bug Reproduction", () => {
+       expect(frame!.length).toBeGreaterThan(0);
+ 
+       // Should still be in plan mode after sending message
+-      expect(frame!).toContain("plan]");
++      expect(frame!).toContain("plan");
+ 
+       // Should still show the input prompt
+       expect(frame!).toContain("Ask anything");
+@@ -74,31 +74,31 @@ describe("TUIChat - Plan Mode Bug Reproduction", () => {
+     try {
+       // Start in normal mode
+       let frame = lastFrame();
+-      expect(frame!).not.toContain("plan]");
+-      expect(frame!).not.toContain("auto]");
++      expect(frame!).not.toContain("plan");
++      expect(frame!).not.toContain("auto");
+ 
+       // Switch to plan mode
+       stdin.write("\x1b[Z");
+       await new Promise((resolve) => setTimeout(resolve, 100));
+ 
+       frame = lastFrame();
+-      expect(frame!).toContain("plan]");
++      expect(frame!).toContain("plan");
+ 
+       // Switch to auto mode
+       stdin.write("\x1b[Z");
+       await new Promise((resolve) => setTimeout(resolve, 100));
+ 
+       frame = lastFrame();
+-      expect(frame!).toContain("auto]");
+-      expect(frame!).not.toContain("plan]");
++      expect(frame!).toContain("auto");
++      expect(frame!).not.toContain("plan");
+ 
+       // Switch back to normal mode
+       stdin.write("\x1b[Z");
+       await new Promise((resolve) => setTimeout(resolve, 100));
+ 
+       frame = lastFrame();
+-      expect(frame!).not.toContain("plan]");
+-      expect(frame!).not.toContain("auto]");
++      expect(frame!).not.toContain("plan");
++      expect(frame!).not.toContain("auto");
+     } finally {
+       unmount();
+     }
+@@ -113,7 +113,7 @@ describe("TUIChat - Plan Mode Bug Reproduction", () => {
+       await new Promise((resolve) => setTimeout(resolve, 100));
+ 
+       let frame = lastFrame();
+-      expect(frame!).toContain("plan]");
++      expect(frame!).toContain("plan");
+ 
+       // Send a message while in plan mode
+       stdin.write("Test message");
+@@ -129,8 +129,8 @@ describe("TUIChat - Plan Mode Bug Reproduction", () => {
+       frame = lastFrame();
+ 
+       // This should work - if it fails, we've reproduced the "can't switch back" bug
+-      expect(frame!).toContain("auto]");
+-      expect(frame!).not.toContain("plan]");
++      expect(frame!).toContain("auto");
++      expect(frame!).not.toContain("plan");
+     } finally {
+       unmount();
+     }
+diff --git a/extensions/cli/src/ui/components/ModeIndicator.test.tsx b/extensions/cli/src/ui/components/ModeIndicator.test.tsx
+index 6301c2204..8c05b3481 100644
+--- a/extensions/cli/src/ui/components/ModeIndicator.test.tsx
++++ b/extensions/cli/src/ui/components/ModeIndicator.test.tsx
+@@ -26,24 +26,24 @@ describe("ModeIndicator", () => {
+ 
+     it("should display plan mode with blue color", () => {
+       const { lastFrame } = render(<ModeIndicator mode="plan" />);
+-      expect(lastFrame()).toContain("plan]");
++      expect(lastFrame()).toContain("plan");
+     });
+ 
+     it("should display auto mode with green color", () => {
+       const { lastFrame } = render(<ModeIndicator mode="auto" />);
+-      expect(lastFrame()).toContain("auto]");
++      expect(lastFrame()).toContain("auto");
+     });
+ 
+     it("should use current mode from service when no mode prop provided", () => {
+       toolPermissionService.switchMode("plan");
+       const { lastFrame } = render(<ModeIndicator />);
+-      expect(lastFrame()).toContain("plan]");
++      expect(lastFrame()).toContain("plan");
+     });
+ 
+     it("should prioritize mode prop over service mode", () => {
+       toolPermissionService.switchMode("plan");
+       const { lastFrame } = render(<ModeIndicator mode="auto" />);
+-      expect(lastFrame()).toContain("auto]");
++      expect(lastFrame()).toContain("auto");
+     });
+   });
+ 
+@@ -57,12 +57,12 @@ describe("ModeIndicator", () => {
+       // Switch to plan
+       toolPermissionService.switchMode("plan");
+       rerender(<ModeIndicator />);
+-      expect(lastFrame()).toContain("plan]");
++      expect(lastFrame()).toContain("plan");
+ 
+       // Switch to auto
+       toolPermissionService.switchMode("auto");
+       rerender(<ModeIndicator />);
+-      expect(lastFrame()).toContain("auto]");
++      expect(lastFrame()).toContain("auto");
+ 
+       // Switch back to normal
+       toolPermissionService.switchMode("normal");
+diff --git a/extensions/cli/src/ui/components/StaticChatContent.tsx b/extensions/cli/src/ui/components/StaticChatContent.tsx
+index 09f9d8bf5..bd15f94f1 100644
+--- a/extensions/cli/src/ui/components/StaticChatContent.tsx
++++ b/extensions/cli/src/ui/components/StaticChatContent.tsx
+@@ -1,6 +1,6 @@
+ import type { AssistantUnrolled, ModelConfig } from "@continuedev/config-yaml";
+ import { Box, Static, Text, useStdout } from "ink";
+-import React, { useCallback, useEffect, useRef, useState } from "react";
++import React, { useCallback, useEffect, useState } from "react";
+ 
+ import type { ChatHistoryItem } from "../../../../../core/index.js";
+ import type { MCPService } from "../../services/MCPService.js";
+@@ -41,34 +41,17 @@ export const StaticChatContent: React.FC<StaticChatContentProps> = ({
+ 
+   // State for managing static refresh with key-based remounting
+   const [staticKey, setStaticKey] = useState(0);
+-  const isInitialMount = useRef(true);
+ 
+-  // Refresh function that clears terminal and remounts Static component
++  // Refresh function that clears terminal and remounts Static component.
++  // This is only for explicit /clear: doing it on every resize makes Ink
++  // replay the whole history, which looks like flicker and jumps back to the
++  // first message. Static content is left untouched on resize.
+   const refreshStatic = useCallback(() => {
+-    // Clear terminal completely including scrollback buffer (3J)
+     stdout.write("\x1b[2J\x1b[H");
+     setStaticKey((prev) => prev + 1);
+     stdout.write("\x1b[3J");
+   }, [stdout]);
+ 
+-  // Debounced terminal resize handler (300ms like gemini-cli)
+-  useEffect(() => {
+-    // Skip refreshing Static during first mount
+-    if (isInitialMount.current) {
+-      isInitialMount.current = false;
+-      return;
+-    }
+-
+-    // Debounce so it doesn't fire too often during resize
+-    const handler = setTimeout(() => {
+-      refreshStatic();
+-    }, 300);
+-
+-    return () => {
+-      clearTimeout(handler);
+-    };
+-  }, [columns, rows, refreshStatic]);
+-
+   // Trigger refresh when refreshTrigger prop changes (for /clear command)
+   useEffect(() => {
+     if (refreshTrigger !== undefined && refreshTrigger > 0) {
+diff --git a/extensions/cli/src/ui/hooks/useChat.helpers.ts b/extensions/cli/src/ui/hooks/useChat.helpers.ts
+index 10d1d4763..20d646297 100644
+--- a/extensions/cli/src/ui/hooks/useChat.helpers.ts
++++ b/extensions/cli/src/ui/hooks/useChat.helpers.ts
+@@ -10,7 +10,7 @@ import { DEFAULT_SESSION_TITLE } from "../../constants/session.js";
+ import { loadSession, startNewSession } from "../../session.js";
+ import { telemetryService } from "../../telemetry/telemetryService.js";
+ import { services } from "../../services/index.js";
+-import { changeWorkspace } from "../../util/workspace.js";
++import { applyWorkspaceChange } from "../../util/workspace.js";
+ 
+ import { processImagePlaceholder } from "./useChat.imageProcessing.js";
+ import { SlashCommandResult } from "./useChat.types.js";
+@@ -352,12 +352,7 @@ export async function handleSpecialCommands({
+       : trimmedMessage.startsWith("cd ")
+         ? trimmedMessage.slice(3)
+         : "";
+-    const result = changeWorkspace(input);
+-    if (result.success) {
+-      try {
+-        void services.fileIndex?.refreshIndex(true);
+-      } catch {}
+-    }
++    const result = await applyWorkspaceChange(input);
+     if (onShowStatusMessage) {
+       onShowStatusMessage(result.message);
+     }
+diff --git a/extensions/cli/src/util/workspace.test.ts b/extensions/cli/src/util/workspace.test.ts
+new file mode 100644
+index 000000000..b09b0a5a4
+--- /dev/null
++++ b/extensions/cli/src/util/workspace.test.ts
+@@ -0,0 +1,42 @@
++import fs from "node:fs";
++import os from "node:os";
++import path from "node:path";
++
++import { afterEach, describe, expect, it } from "vitest";
++
++import { changeWorkspace, resolveWorkspacePath } from "./workspace.js";
++
++const originalCwd = process.cwd();
++const tempDirs: string[] = [];
++
++afterEach(() => {
++  process.chdir(originalCwd);
++  for (const dir of tempDirs.splice(0)) {
++    fs.rmSync(dir, { recursive: true, force: true });
++  }
++});
++
++describe("changeWorkspace", () => {
++  it("changes process.cwd so every tool sees the new directory", () => {
++    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "cn-cd-"));
++    tempDirs.push(dir);
++
++    const result = changeWorkspace(dir);
++
++    expect(result.success).toBe(true);
++    expect(fs.realpathSync(process.cwd())).toBe(fs.realpathSync(dir));
++  });
++
++  it("rejects a missing directory without changing cwd", () => {
++    const before = process.cwd();
++    const result = changeWorkspace("/definitely/not/a/real/directory");
++    expect(result.success).toBe(false);
++    expect(process.cwd()).toBe(before);
++  });
++
++  it("strips quotes and expands a leading tilde", () => {
++    expect(resolveWorkspacePath('"~/project"')).toBe(
++      path.resolve(os.homedir(), "project"),
++    );
++  });
++});
+diff --git a/extensions/cli/src/util/workspace.ts b/extensions/cli/src/util/workspace.ts
+index 6d1939b66..0db2d9a13 100644
+--- a/extensions/cli/src/util/workspace.ts
++++ b/extensions/cli/src/util/workspace.ts
+@@ -2,6 +2,8 @@ import fs from "node:fs";
+ import os from "node:os";
+ import path from "node:path";
+ 
++import { updateSessionWorkspaceDirectory } from "../session.js";
++
+ const recentDirectories = new Set<string>();
+ 
+ function expandTilde(input: string): string {
+@@ -70,6 +72,44 @@ export function changeWorkspace(input: string): {
+   };
+ }
+ 
++/**
++ * Change the workspace and propagate it to everything that caches the
++ * previous directory: session metadata, file search and hooks. Tools always
++ * read process.cwd(), so process.chdir() is the source of truth.
++ */
++export async function applyWorkspaceChange(input: string): Promise<{
++  success: boolean;
++  path?: string;
++  message: string;
++}> {
++  const result = changeWorkspace(input);
++  if (!result.success || !result.path) {
++    return result;
++  }
++
++  updateSessionWorkspaceDirectory(result.path);
++
++  // Dynamic import avoids a module cycle: services/index -> tools ->
++  // changeDirectory -> workspace -> services/index.
++  try {
++    const { services } = await import("../services/index.js");
++    try {
++      await services.fileIndex?.refreshIndex(true);
++    } catch {
++      // File indexing is best-effort; the cwd itself already changed.
++    }
++    try {
++      await services.hooks?.initialize?.(result.path);
++    } catch {
++      // Hooks are optional and may not be initialized in every mode.
++    }
++  } catch {
++    // Services may not be initialized yet (early startup).
++  }
++
++  return result;
++}
++
+ export function getDirectorySuggestions(
+   input: string,
+   limit: number = 12,
+@@ -84,8 +124,7 @@ export function getDirectorySuggestions(
+   }
+ 
+   const absolute = path.resolve(expanded);
+-  const endsWithSeparator =
+-    expanded.endsWith("/") || expanded.endsWith("\\");
++  const endsWithSeparator = expanded.endsWith("/") || expanded.endsWith("\\");
+   const base = endsWithSeparator ? absolute : path.dirname(absolute);
+   const prefix = endsWithSeparator ? "" : path.basename(absolute).toLowerCase();
+   if (!fs.existsSync(base) || !fs.statSync(base).isDirectory()) {
+diff --git a/gui/src/pages/gui/Chat.tsx b/gui/src/pages/gui/Chat.tsx
+index 00e04efd1..ddaac9dd9 100644
+--- a/gui/src/pages/gui/Chat.tsx
++++ b/gui/src/pages/gui/Chat.tsx
+@@ -79,6 +79,15 @@ const StepsDiv = styled.div`
+   .thread-message {
+     margin: 0 0 0 1px;
+   }
++
++  /* Skip layout/paint for offscreen history rows. Long sessions otherwise
++     re-layout every markdown block on each streamed token and can freeze the
++     webview while the model is "generating". Chromium remembers the measured
++     size after the first visit. */
++  & > div[data-chat-message] {
++    content-visibility: auto;
++    contain-intrinsic-size: auto 200px;
++  }
+ `;
+ 
+ export const MAIN_EDITOR_INPUT_ID = "main-editor-input";
+@@ -117,6 +126,18 @@ export function Chat() {
+   const stepsDivRef = useRef<HTMLDivElement>(null);
+   const tabsRef = useRef<HTMLDivElement>(null);
+   const history = useAppSelector((state) => state.session.history);
++  const [showAllHistory, setShowAllHistory] = useState(false);
++  const MAX_RENDERED_MESSAGES = 80;
++  const conversationHistory = history.filter(
++    (item) => item.message.role !== "system",
++  );
++  const hiddenMessageCount = showAllHistory
++    ? 0
++    : Math.max(0, conversationHistory.length - MAX_RENDERED_MESSAGES);
++  const visibleHistory =
++    hiddenMessageCount > 0
++      ? conversationHistory.slice(hiddenMessageCount)
++      : conversationHistory;
+   const showChatScrollbar = useAppSelector(
+     (state) => state.config.config.ui?.showChatScrollbar,
+   );
+@@ -390,13 +411,26 @@ export function Chat() {
+       >
+         <DeprecationBanner dismissable={true} />
+         {highlights}
+-        {history
+-          .filter((item) => item.message.role !== "system")
+-          .map((item, index: number) => (
++        {hiddenMessageCount > 0 && (
++          <div className="px-2 py-1">
++            <button
++              type="button"
++              className="text-description cursor-pointer text-xs underline"
++              onClick={() => setShowAllHistory(true)}
++            >
++              Show {hiddenMessageCount} earlier messages
++            </button>
++          </div>
++        )}
++        {visibleHistory.map((item, visibleIndex: number) => {
++            const index = hiddenMessageCount + visibleIndex;
++            return (
+             <div
+               key={item.message.id}
++              data-chat-message
+               style={{
+-                minHeight: index === history.length - 1 ? "200px" : 0,
++                minHeight:
++                  index === conversationHistory.length - 1 ? "200px" : 0,
+               }}
+             >
+               <ErrorBoundary
+@@ -407,9 +441,10 @@ export function Chat() {
+               >
+                 {renderChatHistoryItem(item, index)}
+               </ErrorBoundary>
+-              {index === history.length - 1 && <InlineErrorMessage />}
++              {index === conversationHistory.length - 1 && <InlineErrorMessage />}
+             </div>
+-          ))}
++            );
++          })}
+       </StepsDiv>
+       <div className={"relative shrink-0"}>
+         <ContinueInputBox
+diff --git a/gui/src/redux/thunks/streamNormalInput.ts b/gui/src/redux/thunks/streamNormalInput.ts
+index 3f303d29c..98dc66d8c 100644
+--- a/gui/src/redux/thunks/streamNormalInput.ts
++++ b/gui/src/redux/thunks/streamNormalInput.ts
+@@ -113,11 +113,26 @@ export const streamNormalInput = createAsyncThunk<
+       }
+     }
+ 
+-    // Use the centralized selector to determine if system message tools should be used
+-    const useNativeTools = state.config.config.experimental
+-      ?.onlyUseSystemMessageTools
+-      ? false
+-      : modelSupportsNativeTools(selectedChatModel);
++    // Tool declaration mode. Native function calling is unreliable on many
++    // corporate OpenAI-compatible proxies and local servers, so default to
++    // the text protocol for Ollama and custom OpenAI endpoints. Users can
++    // force either mode with experimental.onlyUseSystemMessageTools.
++    const forceTextTools =
++      state.config.config.experimental?.onlyUseSystemMessageTools;
++    const isCustomOpenAICompatible =
++      selectedChatModel.provider === "openai" &&
++      (!!selectedChatModel.onPremProxyUrl ||
++        (!!selectedChatModel.apiBase &&
++          !selectedChatModel.apiBase.includes("api.openai.com")));
++    const isLocalProvider = selectedChatModel.provider === "ollama";
++    const useNativeTools =
++      forceTextTools === true
++        ? false
++        : forceTextTools === false
++          ? true
++          : isCustomOpenAICompatible || isLocalProvider
++            ? false
++            : modelSupportsNativeTools(selectedChatModel);
+     const systemToolsFramework = !useNativeTools
+       ? new SystemMessageToolCodeblocksFramework()
+       : undefined;
+@@ -225,7 +240,7 @@ export const streamNormalInput = createAsyncThunk<
+       // streamThunkWrapper resume the turn. Disable with
+       // streamIdleTimeoutMs: 0 (experimental config).
+       const idleTimeoutMs =
+-        state.config.config.experimental?.streamIdleTimeoutMs ?? 120_000;
++        state.config.config.experimental?.streamIdleTimeoutMs ?? 60_000;
+ 
+       let idleTimer: ReturnType<typeof setTimeout> | undefined;
+       const nextWithWatchdog = async () => {
+diff --git a/gui/src/redux/thunks/streamThunkWrapper.tsx b/gui/src/redux/thunks/streamThunkWrapper.tsx
+index 25ec1bc0b..59f026e38 100644
+--- a/gui/src/redux/thunks/streamThunkWrapper.tsx
++++ b/gui/src/redux/thunks/streamThunkWrapper.tsx
+@@ -1,4 +1,5 @@
+ import { createAsyncThunk } from "@reduxjs/toolkit";
++import { streamUpdate } from "../slices/sessionSlice";
+ 
+ import StreamErrorDialog from "../../pages/gui/StreamError";
+ import { analyzeError } from "../../util/errorAnalysis";
+@@ -81,6 +82,14 @@ export const streamThunkWrapper = createAsyncThunk<
+ 
+       if (shouldRetry) {
+         await dispatch(cancelStream());
++        dispatch(
++          streamUpdate([
++            {
++              role: "system",
++              content: `Stream interrupted (${message}). Retrying automatically...`,
++            } as any,
++          ]),
++        );
+         const delayMs = OVERLOADED_DELAY_MS * 2 ** attempt;
+         await new Promise((resolve) => setTimeout(resolve, delayMs));
+         await dispatch(cancelStream());
+-- 
+2.53.0
+
