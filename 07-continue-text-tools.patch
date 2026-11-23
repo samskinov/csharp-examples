@@ -1,34 +1,39 @@
-From 0c080d7b4ededc9473f9527078a79fb32fde8f41 Mon Sep 17 00:00:00 2001
+From bdba37dbffdcca2b8ffc84eed415a9e1ce3a1736 Mon Sep 17 00:00:00 2001
 From: Sam <sam@example.com>
 Date: Mon, 23 Nov 2026 20:11:56 +0100
 Subject: [PATCH] fix(tools): make text mode reliable for OpenAI-compatible
  providers
 
-Rework the text/markdown tool protocol so it never depends on native tools: richer per-tool schemas and examples, ApplyPatch/AskQuestion/ChangeDirectory guidance, recursive argument validation with schema feedback, markdown/JSON/XML parsers, and text-mode history that sends no tools key, no assistant.tool_calls and no tool roles (results are user tool_result blocks).
+Rework the text/markdown tool protocol so it never depends on native tools: richer per-tool schemas and examples, ApplyPatch/AskQuestion/ChangeDirectory guidance, recursive argument validation and repair, markdown/JSON/XML parsers, and text-mode history that sends no tools key, no assistant.tool_calls and no tool roles (results are user tool_result blocks).
 
-Also persist /cd (session, file index, hooks), add the ChangeDirectory tool, fix MCP prefixed tool lookup and wait for MCP handshakes before the first request, and reduce VS Code webview freezes with content-visibility/windowing and retry status.
+Also align CLI and VS Code tool names/arguments (Write/create_new_file, Edit/single_find_and_replace, Search/grep_search, List/ls, multi_edit), restore the session cwd on resume/fork, include a syntax+example reminder in tool error results, fix MCP prefixed tool lookup/readiness, and reduce VS Code webview freezes with incremental history windows and content-visibility.
 ---
  core/config/profile/doLoadConfig.ts           |   4 +-
  core/context/mcp/MCPManagerSingleton.ts       |  39 +-
- core/core.ts                                  |  10 +
+ core/core.ts                                  |  15 +-
  core/llm/defaultSystemMessages.ts             |   6 +
- core/tools/definitions/applyPatch.ts          |   2 +-
+ core/tools/callTool.ts                        |  16 +-
+ core/tools/definitions/applyPatch.ts          |  12 +-
  .../toolCodeblocks/index.ts                   |   5 +-
- core/tools/toolArgumentValidation.ts          | 159 +++++++++
+ core/tools/toolArgumentValidation.ts          | 187 ++++++++++
  core/tools/toolArgumentValidation.vitest.ts   |  87 +++++
+ core/tools/toolCallSanitization.ts            | 172 ++++++++-
+ core/tools/toolCallSanitization.vitest.ts     |  17 +-
  core/util/messageConversion.ts                |  57 +++
+ extensions/cli/src/commands/chat.ts           |   7 +
  extensions/cli/src/messageConversion.test.ts  |  50 +++
  .../cli/src/permissions/defaultPolicies.ts    |  24 ++
  extensions/cli/src/services/MCPService.ts     |  38 +-
  extensions/cli/src/session.ts                 |  14 +
  extensions/cli/src/slashCommands.ts           |  11 +-
  extensions/cli/src/stream/handleToolCalls.ts  |   9 +
- .../src/stream/streamChatResponse.helpers.ts  |  14 +
+ .../src/stream/streamChatResponse.helpers.ts  |  38 +-
  .../cli/src/stream/streamChatResponse.ts      |   1 +
  extensions/cli/src/stream/streamResilience.ts |  40 ++-
  extensions/cli/src/systemMessage.ts           |   4 +
  extensions/cli/src/tools/allBuiltIns.ts       |   2 +
  extensions/cli/src/tools/applyPatch.ts        |  15 +-
+ extensions/cli/src/tools/askQuestion.ts       |   2 +-
  extensions/cli/src/tools/builtInToolNames.ts  |   1 +
  extensions/cli/src/tools/changeDirectory.ts   |  39 ++
  extensions/cli/src/tools/edit.test.ts         |   1 +
@@ -41,17 +46,22 @@ Also persist /cd (session, file index, hooks), add the ChangeDirectory tool, fix
  extensions/cli/src/tools/textToolMode.test.ts |   7 +-
  extensions/cli/src/tools/textToolMode.ts      | 337 ++++++++++++++----
  extensions/cli/src/tools/types.ts             |   1 +
- extensions/cli/src/tools/validateToolArgs.ts  | 118 ++++++
+ extensions/cli/src/tools/validateToolArgs.ts  | 137 +++++++
+ extensions/cli/src/ui/TUIChat.tsx             |   5 +
  .../ui/__tests__/TUIChat.planModeBug.test.tsx |  24 +-
  .../src/ui/components/ModeIndicator.test.tsx  |  12 +-
  .../src/ui/components/StaticChatContent.tsx   |  27 +-
- .../cli/src/ui/hooks/useChat.helpers.ts       |   9 +-
+ .../cli/src/ui/hooks/useChat.helpers.ts       |  12 +-
  extensions/cli/src/util/workspace.test.ts     |  42 +++
  extensions/cli/src/util/workspace.ts          |  43 ++-
- gui/src/pages/gui/Chat.tsx                    |  47 ++-
+ gui/src/pages/gui/Chat.tsx                    |  51 ++-
+ gui/src/redux/slices/sessionSlice.ts          |   5 +-
+ gui/src/redux/thunks/callToolById.ts          |   3 +-
+ .../redux/thunks/preprocessToolCallArgs.ts    |  19 +-
  gui/src/redux/thunks/streamNormalInput.ts     |  27 +-
  gui/src/redux/thunks/streamThunkWrapper.tsx   |   9 +
- 43 files changed, 1191 insertions(+), 234 deletions(-)
+ gui/src/util/clientTools/callClientTool.ts    |   8 +-
+ 53 files changed, 1504 insertions(+), 268 deletions(-)
  create mode 100644 core/tools/toolArgumentValidation.ts
  create mode 100644 core/tools/toolArgumentValidation.vitest.ts
  create mode 100644 extensions/cli/src/tools/changeDirectory.ts
@@ -138,10 +148,10 @@ index cac57e1e6..cb71af82d 100644
    }
  
 diff --git a/core/core.ts b/core/core.ts
-index 93db22182..4019937d9 100644
+index 93db22182..c8adab26e 100644
 --- a/core/core.ts
 +++ b/core/core.ts
-@@ -20,6 +20,10 @@ import Ollama from "./llm/llms/Ollama";
+@@ -20,8 +20,13 @@ import Ollama from "./llm/llms/Ollama";
  import { EditAggregator } from "./nextEdit/context/aggregateEdits";
  import { createNewPromptFileV2 } from "./promptFiles/createNewPromptFile";
  import { callTool } from "./tools/callTool";
@@ -151,9 +161,18 @@ index 93db22182..4019937d9 100644
 +} from "./tools/toolArgumentValidation";
  import {
    normalizeToolArguments,
++  repairToolArguments,
    resolveToolName,
-@@ -1113,6 +1117,12 @@ export class Core {
-           args,
+ } from "./tools/toolCallSanitization";
+ import { ChatDescriber } from "./util/chatDescriber";
+@@ -1109,10 +1114,16 @@ export class Core {
+       }
+ 
+       try {
+-        const normalizedArgs = normalizeToolArguments(
+-          args,
++        const normalizedArgs = repairToolArguments(
++          normalizeToolArguments(args, tool.function.parameters),
            tool.function.parameters,
          );
 +        const issues = validateToolArguments(tool, normalizedArgs);
@@ -182,8 +201,49 @@ index 341b37393..420886315 100644
  
  ${CODEBLOCK_FORMATTING_INSTRUCTIONS}
  
+diff --git a/core/tools/callTool.ts b/core/tools/callTool.ts
+index b8b3a9753..33ac7485e 100644
+--- a/core/tools/callTool.ts
++++ b/core/tools/callTool.ts
+@@ -43,7 +43,11 @@ import { viewDiffImpl } from "./implementations/viewDiff";
+ import { viewRepoMapImpl } from "./implementations/viewRepoMap";
+ import { viewSubdirectoryImpl } from "./implementations/viewSubdirectory";
+ import { coerceArgsToSchema, safeParseToolCallArgs } from "./parseArgs";
+-import { normalizeToolArguments } from "./toolCallSanitization";
++import {
++  normalizeToolArguments,
++  repairToolArguments,
++} from "./toolCallSanitization";
++import { buildToolUsageReminder } from "./toolArgumentValidation";
+ 
+ async function callHttpTool(
+   url: string,
+@@ -297,8 +301,11 @@ export async function callTool(
+   mcpUiState?: McpUiState;
+ }> {
+   try {
+-    const args = normalizeToolArguments(
+-      safeParseToolCallArgs(toolCall),
++    const args = repairToolArguments(
++      normalizeToolArguments(
++        safeParseToolCallArgs(toolCall),
++        tool.function.parameters,
++      ),
+       tool.function.parameters,
+     );
+     const { contextItems, mcpUiState } = tool.uri
+@@ -327,6 +334,9 @@ export async function callTool(
+     } else if (e instanceof Error) {
+       errorMessage = e.message;
+     }
++    errorMessage = `${errorMessage}
++
++${buildToolUsageReminder(tool)}`;
+ 
+     return {
+       contextItems: [],
 diff --git a/core/tools/definitions/applyPatch.ts b/core/tools/definitions/applyPatch.ts
-index 2e8f6c992..f95e8ad45 100644
+index 2e8f6c992..0388e6ffc 100644
 --- a/core/tools/definitions/applyPatch.ts
 +++ b/core/tools/definitions/applyPatch.ts
 @@ -13,7 +13,7 @@ export const applyPatchTool: Tool = {
@@ -195,6 +255,21 @@ index 2e8f6c992..f95e8ad45 100644
      parameters: {
        type: "object",
        required: ["patch"],
+@@ -31,4 +31,14 @@ export const applyPatchTool: Tool = {
+     },
+   },
+   defaultToolPolicy: "allowedWithPermission",
++  systemMessageDescription: {
++    prefix: `To modify one or more existing files atomically, use ApplyPatch with a unified diff or the *** Begin Patch / *** Update File format. Example for one file:`,
++    exampleArgs: [
++      [
++        "patch",
++        "*** Begin Patch\n*** Update File: path/to/file.ts\n@@\n-old line\n+new line\n*** End Patch",
++      ],
++    ],
++  },
++  toolCallIcon: "CodeBracketIcon",
+ };
 diff --git a/core/tools/systemMessageTools/toolCodeblocks/index.ts b/core/tools/systemMessageTools/toolCodeblocks/index.ts
 index 44c8e6921..022368417 100644
 --- a/core/tools/systemMessageTools/toolCodeblocks/index.ts
@@ -213,10 +288,10 @@ index 44c8e6921..022368417 100644
  \`\`\`tool_definition
 diff --git a/core/tools/toolArgumentValidation.ts b/core/tools/toolArgumentValidation.ts
 new file mode 100644
-index 000000000..70742996a
+index 000000000..3e51a12d5
 --- /dev/null
 +++ b/core/tools/toolArgumentValidation.ts
-@@ -0,0 +1,159 @@
+@@ -0,0 +1,187 @@
 +import { Tool } from "..";
 +
 +export interface ToolArgumentIssue {
@@ -376,6 +451,34 @@ index 000000000..70742996a
 +    "Fix the arguments and call the tool again. Do not repeat the same invalid call.",
 +  ].join("\n");
 +}
++
++/**
++ * Compact syntax reminder appended to tool execution errors so the model can
++ * correct a call instead of repeating it or falling back to Bash.
++ */
++export function buildToolUsageReminder(tool: Tool): string {
++  const required = tool.function.parameters?.required?.length
++    ? tool.function.parameters.required.join(", ")
++    : "none";
++  const example = {
++    name: tool.function.name,
++    arguments: sampleValue("arguments", {
++      type: "object",
++      properties: tool.function.parameters?.properties ?? {},
++      required: tool.function.parameters?.required ?? [],
++    }),
++  };
++
++  return [
++    `Tool usage reminder for "${tool.function.name}":`,
++    `Required: ${required}`,
++    "Example:",
++    "```tool",
++    JSON.stringify(example, null, 2),
++    "```",
++    "Call the tool again with this syntax and all required arguments.",
++  ].join("\n");
++}
 diff --git a/core/tools/toolArgumentValidation.vitest.ts b/core/tools/toolArgumentValidation.vitest.ts
 new file mode 100644
 index 000000000..8c23f5ffa
@@ -469,6 +572,266 @@ index 000000000..8c23f5ffa
 +    expect(message).toContain("Do not repeat the same invalid call");
 +  });
 +});
+diff --git a/core/tools/toolCallSanitization.ts b/core/tools/toolCallSanitization.ts
+index db944dd79..24ba3c89f 100644
+--- a/core/tools/toolCallSanitization.ts
++++ b/core/tools/toolCallSanitization.ts
+@@ -74,11 +74,10 @@ export function mergeToolName(current: string, delta: string): string {
+ }
+ 
+ /**
+- * Read-only tool names that differ between the CLI and the VS Code GUI.
+- * Only read-only tools are mapped: inventing a write/edit target from a name
+- * mismatch could modify the wrong file.
++ * Tool names that differ between the CLI and the VS Code GUI. Exact matches
++ * always win; these aliases only repair a model switching harnesses.
+  */
+-const READ_ONLY_TOOL_ALIASES: Record<string, readonly string[]> = {
++const TOOL_NAME_ALIASES: Record<string, readonly string[]> = {
+   read_file: ["Read", "readFile", "read"],
+   read_file_range: ["ReadRange", "readRange"],
+   ls: ["List", "ListDirectory", "listFiles", "listDirectory", "list"],
+@@ -98,15 +97,21 @@ const READ_ONLY_TOOL_ALIASES: Record<string, readonly string[]> = {
+   get_definition: ["GetDefinition", "getDefinition", "GoToDefinition", "gotoDefinition"],
+   search_workspace_symbols: ["SearchWorkspaceSymbols", "searchWorkspaceSymbols", "WorkspaceSymbols"],
+   apply_patch: ["ApplyPatch", "applyPatch", "Patch"],
++  // Write tools. Exact matches always win, so these only repair a model
++  // switching between the CLI and VS Code tool names.
++  create_new_file: ["Write", "WriteFile", "write_file"],
++  single_find_and_replace: ["Edit", "EditFile", "edit_file"],
++  multi_edit: ["MultiEdit", "multiEdit"],
++  run_terminal_command: ["Bash", "bash"],
+ };
+ 
+-function findReadOnlyAlias(
++function findToolAlias(
+   name: string,
+   availableNames: readonly string[],
+ ): string | undefined {
+   const lower = name.toLowerCase();
+ 
+-  for (const [canonical, aliases] of Object.entries(READ_ONLY_TOOL_ALIASES)) {
++  for (const [canonical, aliases] of Object.entries(TOOL_NAME_ALIASES)) {
+     const canonicalAvailable = availableNames.find(
+       (available) => available.toLowerCase() === canonical,
+     );
+@@ -160,9 +165,9 @@ export function resolveToolName(
+     }
+   }
+ 
+-  const readOnlyAlias = findReadOnlyAlias(sanitized, availableNames);
+-  if (readOnlyAlias) {
+-    return readOnlyAlias;
++  const alias = findToolAlias(sanitized, availableNames);
++  if (alias) {
++    return alias;
+   }
+ 
+   // Longest first so that e.g. "ReadFile" wins over "Read".
+@@ -355,7 +360,9 @@ const ARGUMENT_ALIASES: Record<string, readonly string[]> = {
+   replace_all: ["replaceAll", "replaceall"],
+   command: ["cmd"],
+   pattern: ["query", "regex"],
+-  content: ["contents", "text"],
++  query: ["pattern", "regex"],
++  content: ["contents", "text", "body"],
++  contents: ["content", "text", "body"],
+   filepaths: ["files", "paths", "file_paths"],
+   maxCharsPerFile: ["max_chars", "maxChars", "limitPerFile"],
+   statOnly: ["stat_only", "summaryOnly"],
+@@ -411,8 +418,153 @@ export function normalizeToolArguments(
+     if (alias !== undefined) {
+       normalized[canonical] = normalized[alias];
+       delete normalized[alias];
++      continue;
++    }
++
++    // Case/underscore-only differences: dirpath -> dirPath, filePath ->
++    // filepath. Never steal a key that is itself a real schema property.
++    const normalizeKey = (key: string) =>
++      key.toLowerCase().replace(/[_-]/g, "");
++    const similar = Object.keys(normalized).find(
++      (candidate) =>
++        normalizeKey(candidate) === normalizeKey(canonical) &&
++        !(properties && candidate in properties),
++    );
++    if (similar !== undefined) {
++      normalized[canonical] = normalized[similar];
++      delete normalized[similar];
+     }
+   }
+ 
+   return normalized;
+ }
++
++function parseJsonValue(value: unknown): unknown {
++  if (typeof value !== "string") {
++    return value;
++  }
++  try {
++    return JSON.parse(value);
++  } catch {
++    return value;
++  }
++}
++
++function repairArgumentValue(
++  value: unknown,
++  schema: any,
++  depth: number,
++): unknown {
++  if (depth > 8 || !schema) {
++    return value;
++  }
++
++  // A string schema must never turn "123" or "true" into another JSON type;
++  // only objects, arrays, numbers and booleans benefit from repair.
++  if (schema.type === "string") {
++    return value;
++  }
++
++  const parsed = parseJsonValue(value);
++
++  if (schema.type === "object") {
++    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
++      return parsed;
++    }
++    const result: Record<string, any> = { ...(parsed as Record<string, any>) };
++    for (const [key, propertySchema] of Object.entries(
++      schema.properties ?? {},
++    )) {
++      if (result[key] === undefined) {
++        continue;
++      }
++      const repaired = repairArgumentValue(
++        result[key],
++        propertySchema,
++        depth + 1,
++      );
++      const isOptional =
++        !Array.isArray(schema.required) || !schema.required.includes(key);
++      if (
++        isOptional &&
++        (repaired === null ||
++          (typeof repaired === "object" &&
++            repaired !== null &&
++            !Array.isArray(repaired) &&
++            Object.keys(repaired).length === 0 &&
++            (propertySchema as any)?.type !== "object"))
++      ) {
++        delete result[key];
++      } else {
++        result[key] = repaired;
++      }
++    }
++    return result;
++  }
++
++  if (schema.type === "array") {
++    const itemSchema = schema.items ?? {};
++    if (Array.isArray(parsed)) {
++      return parsed.map((item, index) =>
++        repairArgumentValue(item, itemSchema, depth + 1),
++      );
++    }
++    // Some models send a single item where the schema expects an array.
++    const repairedItem = repairArgumentValue(parsed, itemSchema, depth + 1);
++    const itemType = itemSchema.type;
++    const compatible =
++      repairedItem !== null &&
++      repairedItem !== undefined &&
++      (itemType === "object"
++        ? typeof repairedItem === "object" && !Array.isArray(repairedItem)
++        : itemType === "array"
++          ? Array.isArray(repairedItem)
++          : itemType === "integer"
++            ? typeof repairedItem === "number" &&
++              Number.isSafeInteger(repairedItem)
++            : itemType === "number"
++              ? typeof repairedItem === "number" &&
++                Number.isFinite(repairedItem)
++              : (itemType === "string" || itemType === "boolean") &&
++                typeof repairedItem === itemType);
++    return compatible ? [repairedItem] : parsed;
++  }
++
++  if (schema.type === "number" || schema.type === "integer") {
++    if (typeof parsed !== "string" || parsed.trim() === "") {
++      return parsed;
++    }
++    const number = Number(parsed);
++    if (!Number.isFinite(number)) {
++      return parsed;
++    }
++    if (schema.type === "integer" && !Number.isSafeInteger(number)) {
++      return parsed;
++    }
++    return number;
++  }
++
++  if (schema.type === "boolean") {
++    return parsed === "true" ? true : parsed === "false" ? false : parsed;
++  }
++
++  return parsed;
++}
++
++/**
++ * Repairs common schema violations before validation: JSON strings, numeric
++ * strings, stringified arrays/objects and single items where an array is
++ * required. It never invents required values; validation still runs afterwards.
++ */
++export function repairToolArguments(
++  args: Record<string, any> | undefined,
++  schema?: { type?: string; properties?: Record<string, any>; required?: readonly string[] },
++): Record<string, any> {
++  if (!args || typeof args !== "object" || Array.isArray(args)) {
++    return args ?? {};
++  }
++  const repaired = repairArgumentValue(args, schema ?? { type: "object" }, 0);
++  return repaired && typeof repaired === "object" && !Array.isArray(repaired)
++    ? (repaired as Record<string, any>)
++    : {};
++}
+diff --git a/core/tools/toolCallSanitization.vitest.ts b/core/tools/toolCallSanitization.vitest.ts
+index 5e19e05d8..0cd669c8b 100644
+--- a/core/tools/toolCallSanitization.vitest.ts
++++ b/core/tools/toolCallSanitization.vitest.ts
+@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
+ import {
+   mergeToolName,
+   normalizeToolArguments,
++  repairToolArguments,
+   resolveToolName,
+   sanitizeToolName,
+   stripTrailingXmlTags,
+@@ -54,12 +55,24 @@ describe("resolveToolName", () => {
+     expect(resolveToolName("Nonexistent", tools)).toBeUndefined();
+   });
+ 
+-  it("maps read-only CLI/GUI names without mapping write tools", () => {
++  it("maps write tools when the target exists", () => {
++    expect(resolveToolName("Write", ["create_new_file"])).toBe("create_new_file");
++    expect(resolveToolName("Edit", ["single_find_and_replace"])).toBe(
++      "single_find_and_replace",
++    );
++    expect(resolveToolName("MultiEdit", ["multi_edit"])).toBe("multi_edit");
++    expect(resolveToolName("Bash", ["run_terminal_command"])).toBe(
++      "run_terminal_command",
++    );
++  });
++
++  it("maps read-only CLI/GUI names", () => {
+     expect(resolveToolName("Read</arg_value>", ["read_file"])).toBe(
+       "read_file",
+     );
+     expect(resolveToolName("read_file", ["Read"])).toBe("Read");
+-    expect(resolveToolName("Write", ["create_new_file"])).toBeUndefined();
++    expect(resolveToolName("List", ["ls"])).toBe("ls");
++    expect(resolveToolName("Search", ["grep_search"])).toBe("grep_search");
+   });
+ });
+ 
 diff --git a/core/util/messageConversion.ts b/core/util/messageConversion.ts
 index 0e86e2109..6e268f791 100644
 --- a/core/util/messageConversion.ts
@@ -544,6 +907,38 @@ index 0e86e2109..6e268f791 100644
    return [
      {
        role: "system",
+diff --git a/extensions/cli/src/commands/chat.ts b/extensions/cli/src/commands/chat.ts
+index a32df3488..0ab67f75a 100644
+--- a/extensions/cli/src/commands/chat.ts
++++ b/extensions/cli/src/commands/chat.ts
+@@ -29,6 +29,7 @@ import { formatAnthropicError, formatError } from "../util/formatError.js";
+ import { logger } from "../util/logger.js";
+ import { question } from "../util/prompt.js";
+ import { prependPrompt } from "../util/promptProcessor.js";
++import { applyWorkspaceChange } from "../util/workspace.js";
+ import {
+   calculateContextUsagePercentage,
+   countChatHistoryTokens,
+@@ -96,6 +97,9 @@ export async function initializeChatHistory(
+     const sessionToFork = loadSessionById(options.fork);
+     if (sessionToFork) {
+       logger.info(chalk.yellow("Forking from existing session..."));
++      if (sessionToFork.workspaceDirectory) {
++        await applyWorkspaceChange(sessionToFork.workspaceDirectory);
++      }
+       const newSession = startNewSession(sessionToFork.history);
+       return newSession.history;
+     } else {
+@@ -109,6 +113,9 @@ export async function initializeChatHistory(
+     session = loadSession();
+     if (session) {
+       logger.info(chalk.yellow("Resuming previous session..."));
++      if (session.workspaceDirectory) {
++        await applyWorkspaceChange(session.workspaceDirectory);
++      }
+       return session.history;
+     } else {
+       logger.info(chalk.yellow("No previous session found, starting fresh..."));
 diff --git a/extensions/cli/src/messageConversion.test.ts b/extensions/cli/src/messageConversion.test.ts
 index 46c4f4031..9f8d7e7b2 100644
 --- a/extensions/cli/src/messageConversion.test.ts
@@ -841,21 +1236,50 @@ index 8f5b520af..4a82de741 100644
  
    const allowedTools: Tool[] = [];
 diff --git a/extensions/cli/src/stream/streamChatResponse.helpers.ts b/extensions/cli/src/stream/streamChatResponse.helpers.ts
-index d87510521..391a64bfc 100644
+index d87510521..9088bc5e7 100644
 --- a/extensions/cli/src/stream/streamChatResponse.helpers.ts
 +++ b/extensions/cli/src/stream/streamChatResponse.helpers.ts
-@@ -31,6 +31,10 @@ import {
+@@ -6,6 +6,7 @@ import { calculateRequestCost } from "core/llm/utils/calculateRequestCost.js";
+ import {
+   mergeToolName,
+   normalizeToolArguments,
++  repairToolArguments,
+   resolveToolName,
+   tryParseToolArguments,
+ } from "core/tools/toolCallSanitization.js";
+@@ -31,6 +32,11 @@ import {
    validateToolCallArgsPresent,
  } from "../tools/index.js";
  import { PreprocessedToolCall, ToolCall } from "../tools/types.js";
 +import {
 +  buildToolCallRejectionMessage,
++  buildToolUsageReminderForCliTool,
 +  validateToolArguments,
 +} from "../tools/validateToolArgs.js";
  import { logger } from "../util/logger.js";
  
  import { StreamCallbacks } from "./streamChatResponse.types.js";
-@@ -435,6 +439,16 @@ export async function preprocessStreamedToolCalls(
+@@ -402,6 +408,7 @@ export async function preprocessStreamedToolCalls(
+   // Process each tool call
+   for (const toolCall of toolCalls) {
+     const startTime = Date.now();
++    let resolvedTool: Tool | undefined;
+     try {
+       const availableTools: Tool[] = await getAllAvailableTools(isHeadless);
+       // Providers can append XML fragments to the streamed tool name (GLM's
+@@ -428,13 +435,25 @@ export async function preprocessStreamedToolCalls(
+       if (!tool) {
+         throw new Error(`Tool ${toolCall.name} not found`);
+       }
++      resolvedTool = tool;
+ 
+-      // Repair common argument-name mismatches (file_path vs filepath, ...)
+-      toolCall.arguments = normalizeToolArguments(
+-        toolCall.arguments,
++      // Repair names and types before validation: file_path -> filepath,
++      // JSON strings, numeric/boolean strings and stringified arrays.
++      toolCall.arguments = repairToolArguments(
++        normalizeToolArguments(toolCall.arguments, tool.parameters),
          tool.parameters,
        );
  
@@ -872,6 +1296,47 @@ index d87510521..391a64bfc 100644
        validateToolCallArgsPresent(toolCall, tool);
  
        const preprocessedCall: PreprocessedToolCall = {
+@@ -463,6 +482,10 @@ export async function preprocessStreamedToolCalls(
+ 
+       const errorMessage =
+         error instanceof Error ? error.message : String(error);
++      const feedback =
++        resolvedTool && !errorMessage.includes("Correct example")
++          ? `${errorMessage}\n\n${buildToolUsageReminderForCliTool(resolvedTool)}`
++          : errorMessage;
+ 
+       logger.error("Invalid tool call", {
+         name: toolCall.name,
+@@ -482,11 +505,11 @@ export async function preprocessStreamedToolCalls(
+       errorChatEntries.push({
+         role: "tool",
+         tool_call_id: toolCall.id,
+-        content: errorMessage,
++        content: feedback,
+       });
+ 
+       // Notify about the error
+-      callbacks?.onToolError?.(errorMessage, toolCall.name);
++      callbacks?.onToolError?.(feedback, toolCall.name);
+     }
+   }
+ 
+@@ -617,12 +640,13 @@ export async function executeStreamedToolCalls(
+               );
+             } catch {}
+           } catch (error) {
+-            const errorMessage = `Error executing tool ${call.name}: ${
++            const rawError = `Error executing tool ${call.name}: ${
+               error instanceof Error ? error.message : String(error)
+             }`;
++            const errorMessage = `${rawError}\n\n${buildToolUsageReminderForCliTool(call.tool)}`;
+             logger.error("Tool execution failed", {
+               name: call.name,
+-              error: errorMessage,
++              error: rawError,
+             });
+             entriesByIndex.set(index, {
+               role: "tool",
 diff --git a/extensions/cli/src/stream/streamChatResponse.ts b/extensions/cli/src/stream/streamChatResponse.ts
 index 7afb41a5f..658ff1abf 100644
 --- a/extensions/cli/src/stream/streamChatResponse.ts
@@ -1034,6 +1499,19 @@ index 91797ff61..24226617b 100644
          newContent = diffLines
            .filter((line) => line.type !== "old")
            .map((line) => line.line)
+diff --git a/extensions/cli/src/tools/askQuestion.ts b/extensions/cli/src/tools/askQuestion.ts
+index beb3f81fb..e56dfd871 100644
+--- a/extensions/cli/src/tools/askQuestion.ts
++++ b/extensions/cli/src/tools/askQuestion.ts
+@@ -12,7 +12,7 @@ Guidelines:
+ `,
+   parameters: {
+     type: "object",
+-    required: ["question", "options"],
++    required: ["question"],
+     properties: {
+       question: {
+         type: "string",
 diff --git a/extensions/cli/src/tools/builtInToolNames.ts b/extensions/cli/src/tools/builtInToolNames.ts
 index eac06694d..952816346 100644
 --- a/extensions/cli/src/tools/builtInToolNames.ts
@@ -1789,10 +2267,10 @@ index 612bd22ff..6b270e484 100644
    };
 diff --git a/extensions/cli/src/tools/validateToolArgs.ts b/extensions/cli/src/tools/validateToolArgs.ts
 new file mode 100644
-index 000000000..a237656a6
+index 000000000..d6420e9b7
 --- /dev/null
 +++ b/extensions/cli/src/tools/validateToolArgs.ts
-@@ -0,0 +1,118 @@
+@@ -0,0 +1,137 @@
 +import { buildToolCallExample } from "./textToolMode.js";
 +import { Tool } from "./types.js";
 +
@@ -1877,6 +2355,25 @@ index 000000000..a237656a6
 +  return issues;
 +}
 +
++export function buildToolUsageReminderForCliTool(tool: Tool): string {
++  const required = tool.parameters.required?.length
++    ? tool.parameters.required.join(", ")
++    : "none";
++  return [
++    `Tool usage reminder for "${tool.name}":`,
++    `Required: ${required}`,
++    "Example:",
++    "```tool",
++    buildToolCallExample({
++      name: tool.name,
++      description: tool.description,
++      parameters: tool.parameters,
++    }),
++    "```",
++    "Call the tool again with this syntax and all required arguments.",
++  ].join("\n");
++}
++
 +export function buildToolCallRejectionMessage(
 +  tool: Tool,
 +  args: Record<string, any>,
@@ -1911,6 +2408,29 @@ index 000000000..a237656a6
 +    "Fix the arguments and call the tool again. Do not repeat the same invalid call.",
 +  ].join("\n");
 +}
+diff --git a/extensions/cli/src/ui/TUIChat.tsx b/extensions/cli/src/ui/TUIChat.tsx
+index 924583423..26c2bb7f5 100644
+--- a/extensions/cli/src/ui/TUIChat.tsx
++++ b/extensions/cli/src/ui/TUIChat.tsx
+@@ -21,6 +21,7 @@ import {
+ import { getTotalSessionCost } from "../session.js";
+ import { bashToolEvents } from "../util/cli.js";
+ import { logger } from "../util/logger.js";
++import { applyWorkspaceChange } from "../util/workspace.js";
+ 
+ import { ActionStatus } from "./components/ActionStatus.js";
+ import { BottomStatusBar } from "./components/BottomStatusBar.js";
+@@ -73,6 +74,10 @@ async function loadAndSetSession(
+       "",
+     );
+ 
++    if (session.workspaceDirectory) {
++      await applyWorkspaceChange(session.workspaceDirectory);
++    }
++
+     // Set the chat history from the session
+     setChatHistory(session.history);
+ 
 diff --git a/extensions/cli/src/ui/__tests__/TUIChat.planModeBug.test.tsx b/extensions/cli/src/ui/__tests__/TUIChat.planModeBug.test.tsx
 index 90d5fedf9..e5b8c5d61 100644
 --- a/extensions/cli/src/ui/__tests__/TUIChat.planModeBug.test.tsx
@@ -2092,7 +2612,7 @@ index 09f9d8bf5..bd15f94f1 100644
    useEffect(() => {
      if (refreshTrigger !== undefined && refreshTrigger > 0) {
 diff --git a/extensions/cli/src/ui/hooks/useChat.helpers.ts b/extensions/cli/src/ui/hooks/useChat.helpers.ts
-index 10d1d4763..20d646297 100644
+index 10d1d4763..38508ad4d 100644
 --- a/extensions/cli/src/ui/hooks/useChat.helpers.ts
 +++ b/extensions/cli/src/ui/hooks/useChat.helpers.ts
 @@ -10,7 +10,7 @@ import { DEFAULT_SESSION_TITLE } from "../../constants/session.js";
@@ -2104,7 +2624,17 @@ index 10d1d4763..20d646297 100644
  
  import { processImagePlaceholder } from "./useChat.imageProcessing.js";
  import { SlashCommandResult } from "./useChat.types.js";
-@@ -352,12 +352,7 @@ export async function handleSpecialCommands({
+@@ -25,6 +25,9 @@ export async function initChatHistory(
+   if (resume) {
+     const savedSession = loadSession();
+     if (savedSession) {
++      if (savedSession.workspaceDirectory) {
++        await applyWorkspaceChange(savedSession.workspaceDirectory);
++      }
+       return savedSession.history;
+     }
+   }
+@@ -352,12 +355,7 @@ export async function handleSpecialCommands({
        : trimmedMessage.startsWith("cd ")
          ? trimmedMessage.slice(3)
          : "";
@@ -2235,7 +2765,7 @@ index 6d1939b66..0db2d9a13 100644
    const prefix = endsWithSeparator ? "" : path.basename(absolute).toLowerCase();
    if (!fs.existsSync(base) || !fs.statSync(base).isDirectory()) {
 diff --git a/gui/src/pages/gui/Chat.tsx b/gui/src/pages/gui/Chat.tsx
-index 00e04efd1..ddaac9dd9 100644
+index 00e04efd1..4dc93532d 100644
 --- a/gui/src/pages/gui/Chat.tsx
 +++ b/gui/src/pages/gui/Chat.tsx
 @@ -79,6 +79,15 @@ const StepsDiv = styled.div`
@@ -2254,18 +2784,19 @@ index 00e04efd1..ddaac9dd9 100644
  `;
  
  export const MAIN_EDITOR_INPUT_ID = "main-editor-input";
-@@ -117,6 +126,18 @@ export function Chat() {
+@@ -117,6 +126,19 @@ export function Chat() {
    const stepsDivRef = useRef<HTMLDivElement>(null);
    const tabsRef = useRef<HTMLDivElement>(null);
    const history = useAppSelector((state) => state.session.history);
-+  const [showAllHistory, setShowAllHistory] = useState(false);
 +  const MAX_RENDERED_MESSAGES = 80;
++  const [historyWindow, setHistoryWindow] = useState(MAX_RENDERED_MESSAGES);
 +  const conversationHistory = history.filter(
 +    (item) => item.message.role !== "system",
 +  );
-+  const hiddenMessageCount = showAllHistory
-+    ? 0
-+    : Math.max(0, conversationHistory.length - MAX_RENDERED_MESSAGES);
++  const hiddenMessageCount = Math.max(
++    0,
++    conversationHistory.length - historyWindow,
++  );
 +  const visibleHistory =
 +    hiddenMessageCount > 0
 +      ? conversationHistory.slice(hiddenMessageCount)
@@ -2273,7 +2804,7 @@ index 00e04efd1..ddaac9dd9 100644
    const showChatScrollbar = useAppSelector(
      (state) => state.config.config.ui?.showChatScrollbar,
    );
-@@ -390,13 +411,26 @@ export function Chat() {
+@@ -390,13 +412,29 @@ export function Chat() {
        >
          <DeprecationBanner dismissable={true} />
          {highlights}
@@ -2285,9 +2816,12 @@ index 00e04efd1..ddaac9dd9 100644
 +            <button
 +              type="button"
 +              className="text-description cursor-pointer text-xs underline"
-+              onClick={() => setShowAllHistory(true)}
++              onClick={() =>
++                setHistoryWindow((previous) => previous + MAX_RENDERED_MESSAGES)
++              }
 +            >
-+              Show {hiddenMessageCount} earlier messages
++              Show {Math.min(MAX_RENDERED_MESSAGES, hiddenMessageCount)} earlier
++              messages
 +            </button>
 +          </div>
 +        )}
@@ -2304,7 +2838,7 @@ index 00e04efd1..ddaac9dd9 100644
                }}
              >
                <ErrorBoundary
-@@ -407,9 +441,10 @@ export function Chat() {
+@@ -407,9 +445,10 @@ export function Chat() {
                >
                  {renderChatHistoryItem(item, index)}
                </ErrorBoundary>
@@ -2317,6 +2851,92 @@ index 00e04efd1..ddaac9dd9 100644
        </StepsDiv>
        <div className={"relative shrink-0"}>
          <ContinueInputBox
+diff --git a/gui/src/redux/slices/sessionSlice.ts b/gui/src/redux/slices/sessionSlice.ts
+index eaed1eb2d..c72c54907 100644
+--- a/gui/src/redux/slices/sessionSlice.ts
++++ b/gui/src/redux/slices/sessionSlice.ts
+@@ -28,6 +28,7 @@ import {
+ import { mergeReasoningDetails } from "core/llm/openaiTypeConverters";
+ import {
+   normalizeToolArguments,
++  repairToolArguments,
+   resolveToolName,
+   tryParseToolArguments,
+ } from "core/tools/toolCallSanitization";
+@@ -869,8 +870,8 @@ export const sessionSlice = createSlice({
+           toolCallState.toolCall.function.arguments,
+         );
+         if (parsedArgs) {
+-          const normalizedArgs = normalizeToolArguments(
+-            parsedArgs,
++          const normalizedArgs = repairToolArguments(
++            normalizeToolArguments(parsedArgs, tool?.function.parameters),
+             tool?.function.parameters,
+           );
+           toolCallState.toolCall.function.arguments =
+diff --git a/gui/src/redux/thunks/callToolById.ts b/gui/src/redux/thunks/callToolById.ts
+index 557b0b95b..c8b90b2af 100644
+--- a/gui/src/redux/thunks/callToolById.ts
++++ b/gui/src/redux/thunks/callToolById.ts
+@@ -5,6 +5,7 @@ import {
+   resolveToolName,
+   tryParseToolArguments,
+ } from "core/tools/toolCallSanitization";
++import { buildToolUsageReminder } from "core/tools/toolArgumentValidation";
+ import { ContinueError, ContinueErrorReason } from "core/util/errors";
+ 
+ import { callClientTool } from "../../util/clientTools/callClientTool";
+@@ -164,7 +165,7 @@ export const callToolById = createAsyncThunk<
+             icon: "problems",
+             name: "Tool Call Error",
+             description: "Tool Call Failed",
+-            content: `${toolCallState.toolCall.function.name} failed with the message: ${error.message}\n\nPlease try something else or request further instructions.`,
++            content: `${toolCallState.toolCall.function.name} failed with the message: ${error.message}\n\n${toolCallState.tool ? buildToolUsageReminder(toolCallState.tool) : ""}\n\nPlease try something else or request further instructions.`,
+             hidden: false,
+           },
+         ],
+diff --git a/gui/src/redux/thunks/preprocessToolCallArgs.ts b/gui/src/redux/thunks/preprocessToolCallArgs.ts
+index c51732d99..e79b8f0f6 100644
+--- a/gui/src/redux/thunks/preprocessToolCallArgs.ts
++++ b/gui/src/redux/thunks/preprocessToolCallArgs.ts
+@@ -1,5 +1,9 @@
+ import { ToolCallState } from "core";
+-import { normalizeToolArguments } from "core/tools/toolCallSanitization";
++import {
++  normalizeToolArguments,
++  repairToolArguments,
++} from "core/tools/toolCallSanitization";
++import { buildToolUsageReminder } from "core/tools/toolArgumentValidation";
+ import { ContinueErrorReason } from "core/util/errors";
+ 
+ import { IIdeMessenger } from "../../context/IdeMessenger";
+@@ -23,8 +27,11 @@ export async function preprocessToolCalls(
+       let preprocessedArgs: Record<string, unknown> | undefined = undefined;
+       const result = await ideMessenger.request("tools/preprocessArgs", {
+         toolName: tcState.toolCall.function.name,
+-        args: normalizeToolArguments(
+-          tcState.parsedArgs,
++        args: repairToolArguments(
++          normalizeToolArguments(
++            tcState.parsedArgs,
++            tcState.tool?.function.parameters,
++          ),
+           tcState.tool?.function.parameters,
+         ),
+       });
+@@ -50,7 +57,11 @@ export async function preprocessToolCalls(
+                 icon: "problems",
+                 name: "Invalid Tool Call",
+                 description: "",
+-                content: `${tcState.toolCall.function.name} failed because the arguments were invalid, with the following message: ${errorMessage}\n\nPlease try something else or request further instructions.`,
++                content: `${tcState.toolCall.function.name} failed because the arguments were invalid, with the following message: ${errorMessage}\n\n${
++                  tcState.tool && !errorMessage?.includes("Correct example")
++                    ? buildToolUsageReminder(tcState.tool)
++                    : ""
++                }\n\nPlease try something else or request further instructions.`,
+                 hidden: false,
+               },
+             ],
 diff --git a/gui/src/redux/thunks/streamNormalInput.ts b/gui/src/redux/thunks/streamNormalInput.ts
 index 3f303d29c..98dc66d8c 100644
 --- a/gui/src/redux/thunks/streamNormalInput.ts
@@ -2387,6 +3007,32 @@ index 25ec1bc0b..59f026e38 100644
          const delayMs = OVERLOADED_DELAY_MS * 2 ** attempt;
          await new Promise((resolve) => setTimeout(resolve, delayMs));
          await dispatch(cancelStream());
+diff --git a/gui/src/util/clientTools/callClientTool.ts b/gui/src/util/clientTools/callClientTool.ts
+index abd5af5fc..b00c9b8eb 100644
+--- a/gui/src/util/clientTools/callClientTool.ts
++++ b/gui/src/util/clientTools/callClientTool.ts
+@@ -2,6 +2,7 @@ import { ContextItem, ToolCallState } from "core";
+ import { BuiltInToolNames, CLIENT_TOOLS_IMPLS } from "core/tools/builtIn";
+ import {
+   normalizeToolArguments,
++  repairToolArguments,
+   resolveToolName,
+ } from "core/tools/toolCallSanitization";
+ import { ContinueError, ContinueErrorReason } from "core/util/errors";
+@@ -38,8 +39,11 @@ export async function callClientTool(
+ ): Promise<ClientToolResult> {
+   const { toolCall, parsedArgs } = toolCallState;
+   try {
+-    const args = normalizeToolArguments(
+-      parsedArgs,
++    const args = repairToolArguments(
++      normalizeToolArguments(
++        parsedArgs,
++        toolCallState.tool?.function.parameters,
++      ),
+       toolCallState.tool?.function.parameters,
+     );
+     const resolvedName =
 -- 
 2.53.0
 
