@@ -16,10 +16,46 @@ d'entreprise.
 | 4 | `04-continue-cli-tools.patch` | 6 commits : chat sans tools natifs, system message unique, `/tool-mode`, tool calls XML, fallback texte, VSIX ciblé |
 | 5 | `05-continue-vscode-activation.patch` | 1 commit : logs d'activation, `system-ca` dynamique, binding `win-ca` |
 | 6 | `06-continue-agent-performance.patch` | 1 commit : outils agent, boucles et streaming texte |
-| 7 | `07-continue-text-tools.patch` | 1 commit : mode texte fiable OpenAI-compatible, aucun `tools`/`tool_calls` natif, schémas/exemples, réparation/validation des arguments, alias CLI↔GUI, rappel syntaxe+exemple dans les erreurs, `/cd` persistant et restauré au resume/fork, ChangeDirectory, MCP prêt avant la première requête, virtualisation maison de l’historique GUI sans nouvelle dépendance |
+| 7 | `07-continue-text-tools.patch` | 1 commit : mode texte fiable OpenAI-compatible, aucun `tools`/`tool_calls` natif, sélection d’outils expliquée, réparation/validation des arguments, alias CLI↔GUI, rappels de syntaxe adaptés au mode natif/texte, `/cd` persistant et restauré au resume/fork, ChangeDirectory, MCP prêt avant la première requête, recherche toujours disponible avec fallback grep/findstr, écritures séquentielles, limite agent portée à 100, virtualisation et anti-débordement GUI sans nouvelle dépendance |
 
 ⚠️ Empilement vérifié : `git am` 14+4+1+6+1+1+1 = **28 commits** sur
 `refs/heads/main` propre.
+
+### Correctifs du patch 07 (vérifiés)
+
+- **Aucune incohérence de mode** : en mode texte, la requête ne contient ni
+  `tools`, ni `assistant.tool_calls`, ni `role:"tool"`; les résultats partent
+  en messages `user` avec `<tool_result>`. Les rappels d’erreur utilisent la
+  syntaxe du mode courant (`TOOL_NAME/BEGIN_ARG` en texte GUI, JSON en CLI,
+  arguments JSON en natif) au lieu d’imposer un format contradictoire.
+- **Sélection d’outils explicite dans les prompts** : Read/ReadRange/
+  ReadManyFiles, Search/Glob/List, ApplyPatch/Edit/MultiEdit/Write,
+  Bash/ChangeDirectory, AskQuestion et les tools de symboles sont décrits avec
+  leur usage respectif ; les prompts plan mode ne proposent plus d’outil
+  d’écriture.
+- **Recherche réparée** : `Search` reste déclaré même sans ripgrep (fallback
+  `grep`/`findstr`), le fallback est insensible à la casse par défaut, gère les
+  fichiers ciblés et les contextes, et les lignes longues sont tronquées au
+  lieu de faire croire à zéro résultat. Les motifs invalides renvoient une
+  erreur explicite (`fixedStrings` pour du texte littéral).
+- **Boucles d’agent** : la limite passe de 25 à **100 tours** (configurable,
+  `0` désactive côté GUI), et le garde-fou « même appel répété » ne bloque plus
+  un fichier relu après une édition : seuls 5 appels identiques **consécutifs**
+  arrêtent la boucle.
+- **Écritures sûres** : les appels read-only peuvent tourner en parallèle ;
+  dès qu’un lot contient une écriture/édition, tous les appels du lot
+  s’exécutent dans l’ordre du modèle.
+- **MCP** : attente bornée une seule fois par initialisation (pas 8 s ajoutées
+  à chaque requête), rejet des promesses géré, noms `serveur_outil` et
+  readiness corrigés.
+- **GUI** : virtualisation sans dépendance (>100 messages), scroll ancré,
+  `content-visibility` conservé pour les petites sessions, et plus de
+  débordement horizontal avec un texte sans espaces/un long message (le bouton
+  d’envoi et les boutons accepter/refuser restent visibles). Vérifié en Chrome
+  headless : `main.scrollWidth == main.clientWidth`, bouton Envoyer dans la
+  fenêtre.
+- **CLI** : `/cd` met à jour le cwd, l’index et les hooks, puis le system
+  message suivant affiche le nouveau répertoire et le nouveau git status.
 
 ## 1. Clone + patchs
 
@@ -394,4 +430,17 @@ CLI et VSIX. Aucun binding natif SQLite/ripgrep n'est requis:
 - LanceDB VSIX Windows est limité à win32-x64;
 - les scripts `--ignore-scripts` évitent les téléchargements Sharp/Puppeteer
   sans bloquer le build.
+
+Validation finale du patch 07 sur un worktree propre (les 7 patchs réappliqués,
+28 commits, `git status` vide) avec Node 24.22.3 :
+
+- `git am` des 7 patchs : OK, **28 commits** ;
+- build packages + core + CLI + GUI : OK ;
+- tests CLI complets : **1733 passés**, 29 ignorés ;
+- tests core ciblés (tools, messages, MCP, grep) : **107 passés** ;
+- tests GUI (chat, tools, virtualisation, mode de déclaration) : **50 passés** ;
+- `tsc` core/CLI/GUI : OK ;
+- contrôle Chrome headless du composer : aucun débordement horizontal, bouton
+  Envoyer visible ;
+- aucune modification de `package.json`/`package-lock.json`.
 

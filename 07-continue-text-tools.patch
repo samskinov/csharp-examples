@@ -1,4 +1,4 @@
-From 0dbf3df9376fd60121c125c5fb2df4ea9519a98b Mon Sep 17 00:00:00 2001
+From c9f42afe9e2c79de1b2dfd0d6dffaf5d97b2c76b Mon Sep 17 00:00:00 2001
 From: Sam <sam@example.com>
 Date: Mon, 23 Nov 2026 20:11:56 +0100
 Subject: [PATCH] fix(tools): make text mode reliable for OpenAI-compatible
@@ -9,66 +9,102 @@ Rework the text/markdown tool protocol so it never depends on native tools: rich
 Also align CLI and VS Code tool names/arguments (Write/create_new_file, Edit/single_find_and_replace, Search/grep_search, List/ls, multi_edit), restore the session cwd on resume/fork, include a syntax+example reminder in tool error results, fix MCP prefixed tool lookup/readiness, and reduce VS Code webview freezes with incremental history windows and content-visibility.
 ---
  core/config/profile/doLoadConfig.ts           |   4 +-
- core/context/mcp/MCPManagerSingleton.ts       |  39 +-
+ core/context/mcp/MCPManagerSingleton.ts       |  62 ++-
  core/core.ts                                  |  15 +-
- core/llm/defaultSystemMessages.ts             |   6 +
- core/tools/callTool.ts                        |  16 +-
+ core/index.d.ts                               |   2 +-
+ core/llm/defaultSystemMessages.ts             |  24 +-
+ core/tools/callTool.ts                        |  13 +-
  core/tools/definitions/applyPatch.ts          |  12 +-
- .../toolCodeblocks/index.ts                   |   5 +-
- core/tools/toolArgumentValidation.ts          | 187 ++++++++++
- core/tools/toolArgumentValidation.vitest.ts   |  87 +++++
- core/tools/toolCallSanitization.ts            | 182 +++++++++-
- core/tools/toolCallSanitization.vitest.ts     |  17 +-
- core/util/messageConversion.ts                |  57 +++
+ core/tools/definitions/askQuestion.ts         |   1 +
+ core/tools/definitions/grepSearch.ts          |   2 +-
+ core/tools/definitions/ls.ts                  |   3 +-
+ core/tools/definitions/readFileRange.ts       |   8 +-
+ core/tools/definitions/runTerminalCommand.ts  |   2 +-
+ core/tools/implementations/applyPatch.ts      |  19 +
+ core/tools/implementations/grepSearch.ts      |   2 +-
+ .../toolCodeblocks/index.ts                   |  17 +-
+ core/tools/toolArgumentValidation.ts          | 223 +++++++++
+ core/tools/toolArgumentValidation.vitest.ts   | 138 ++++++
+ core/tools/toolCallSanitization.ts            | 261 +++++++++-
+ core/tools/toolCallSanitization.vitest.ts     |  33 +-
+ core/util/messageConversion.ts                |  79 +++
  extensions/cli/src/commands/chat.ts           |   7 +
- extensions/cli/src/messageConversion.test.ts  |  50 +++
- .../cli/src/permissions/defaultPolicies.ts    |  24 ++
- extensions/cli/src/services/MCPService.ts     |  38 +-
+ extensions/cli/src/messageConversion.test.ts  |  89 ++++
+ .../cli/src/permissions/defaultPolicies.ts    |  24 +
+ extensions/cli/src/services/MCPService.ts     |  62 ++-
  extensions/cli/src/session.ts                 |  14 +
  extensions/cli/src/slashCommands.ts           |  11 +-
- extensions/cli/src/stream/handleToolCalls.ts  |   9 +
- .../src/stream/streamChatResponse.helpers.ts  |  38 +-
- .../cli/src/stream/streamChatResponse.ts      |   1 +
+ extensions/cli/src/stream/handleToolCalls.ts  |  30 +-
+ .../src/stream/streamChatResponse.helpers.ts  | 174 ++++---
+ .../cli/src/stream/streamChatResponse.ts      |  31 +-
  extensions/cli/src/stream/streamResilience.ts |  40 +-
- extensions/cli/src/systemMessage.ts           |   4 +
+ extensions/cli/src/systemMessage.test.ts      |  12 +
+ extensions/cli/src/systemMessage.ts           |  48 +-
  extensions/cli/src/tools/allBuiltIns.ts       |   2 +
- extensions/cli/src/tools/applyPatch.ts        |  15 +-
+ extensions/cli/src/tools/applyPatch.ts        |  35 +-
  extensions/cli/src/tools/askQuestion.ts       |   2 +-
  extensions/cli/src/tools/builtInToolNames.ts  |   1 +
  extensions/cli/src/tools/changeDirectory.ts   |  39 ++
  extensions/cli/src/tools/edit.test.ts         |   1 +
- extensions/cli/src/tools/index.tsx            |   2 +
+ extensions/cli/src/tools/edit.ts              |   7 +
+ extensions/cli/src/tools/globFiles.ts         |   2 +-
+ extensions/cli/src/tools/index.tsx            |  14 +-
+ extensions/cli/src/tools/listFiles.ts         |   3 +-
  extensions/cli/src/tools/multiEdit.test.ts    |   1 +
- extensions/cli/src/tools/readFile.ts          |  21 +-
+ extensions/cli/src/tools/multiEdit.ts         |   7 +
+ extensions/cli/src/tools/readFile.test.ts     |  67 +++
+ extensions/cli/src/tools/readFile.ts          |  34 +-
+ extensions/cli/src/tools/readFileRange.ts     |   4 +-
  .../cli/src/tools/runTerminalCommand.ts       |   4 +-
- extensions/cli/src/tools/searchCode.test.ts   |   2 +-
- extensions/cli/src/tools/searchCode.ts        |  60 +--
- extensions/cli/src/tools/textToolMode.test.ts |   7 +-
- extensions/cli/src/tools/textToolMode.ts      | 337 +++++++++++++----
+ extensions/cli/src/tools/searchCode.test.ts   |   5 +-
+ extensions/cli/src/tools/searchCode.ts        | 235 +++------
+ extensions/cli/src/tools/textToolMode.test.ts |  90 +++-
+ extensions/cli/src/tools/textToolMode.ts      | 463 ++++++++++++++----
  extensions/cli/src/tools/types.ts             |   1 +
- extensions/cli/src/tools/validateToolArgs.ts  | 137 +++++++
+ .../cli/src/tools/validateToolArgs.test.ts    |  53 ++
+ extensions/cli/src/tools/validateToolArgs.ts  | 163 ++++++
+ extensions/cli/src/tools/writeFile.ts         |   3 +-
  extensions/cli/src/ui/TUIChat.tsx             |   5 +
  .../ui/__tests__/TUIChat.planModeBug.test.tsx |  24 +-
  .../src/ui/components/ModeIndicator.test.tsx  |  12 +-
- .../src/ui/components/StaticChatContent.tsx   |  27 +-
+ .../src/ui/components/StaticChatContent.tsx   |  29 +-
  .../cli/src/ui/hooks/useChat.helpers.ts       |  12 +-
- extensions/cli/src/util/workspace.test.ts     |  42 +++
- extensions/cli/src/util/workspace.ts          |  43 ++-
- gui/src/pages/gui/Chat.tsx                    |  55 +--
- gui/src/pages/gui/VirtualizedHistory.tsx      | 342 ++++++++++++++++++
+ extensions/cli/src/util/workspace.test.ts     |  42 ++
+ extensions/cli/src/util/workspace.ts          |  62 ++-
+ .../StepContainerPreToolbar/ApplyActions.tsx  |   4 +-
+ .../StepContainerPreToolbar/index.tsx         |   4 +-
+ .../StyledMarkdownPreview/index.tsx           |  22 +-
+ .../components/mainInput/ContinueInputBox.tsx |   2 +-
+ .../components/mainInput/GradientBorder.tsx   |   2 +
+ gui/src/components/mainInput/InputToolbar.tsx |   6 +-
+ .../mainInput/TipTapEditor/TipTapEditor.css   |  13 +
+ .../mainInput/TipTapEditor/TipTapEditor.tsx   |   4 +-
+ .../components/StyledComponents.ts            |   2 +
+ gui/src/pages/gui/Chat.tsx                    |  59 ++-
+ .../pages/gui/ToolCallDiv/FindAndReplace.tsx  |  34 +-
+ gui/src/pages/gui/VirtualizedHistory.test.tsx |  74 +++
+ gui/src/pages/gui/VirtualizedHistory.tsx      | 358 ++++++++++++++
+ gui/src/pages/gui/index.tsx                   |   2 +-
  gui/src/redux/slices/sessionSlice.ts          |   5 +-
- gui/src/redux/thunks/callToolById.ts          |   3 +-
- .../redux/thunks/preprocessToolCallArgs.ts    |  19 +-
- gui/src/redux/thunks/streamNormalInput.ts     |  27 +-
+ gui/src/redux/thunks/callToolById.ts          |  41 +-
+ .../redux/thunks/preprocessToolCallArgs.ts    |  21 +-
+ gui/src/redux/thunks/streamNormalInput.ts     |  57 ++-
  gui/src/redux/thunks/streamThunkWrapper.tsx   |   9 +
+ .../redux/util/toolDeclarationMode.test.ts    |  59 +++
+ gui/src/redux/util/toolDeclarationMode.ts     |  42 ++
  gui/src/util/clientTools/callClientTool.ts    |   8 +-
- 54 files changed, 1840 insertions(+), 288 deletions(-)
+ 85 files changed, 3095 insertions(+), 617 deletions(-)
  create mode 100644 core/tools/toolArgumentValidation.ts
  create mode 100644 core/tools/toolArgumentValidation.vitest.ts
  create mode 100644 extensions/cli/src/tools/changeDirectory.ts
+ create mode 100644 extensions/cli/src/tools/readFile.test.ts
+ create mode 100644 extensions/cli/src/tools/validateToolArgs.test.ts
  create mode 100644 extensions/cli/src/tools/validateToolArgs.ts
  create mode 100644 extensions/cli/src/util/workspace.test.ts
+ create mode 100644 gui/src/pages/gui/VirtualizedHistory.test.tsx
  create mode 100644 gui/src/pages/gui/VirtualizedHistory.tsx
+ create mode 100644 gui/src/redux/util/toolDeclarationMode.test.ts
+ create mode 100644 gui/src/redux/util/toolDeclarationMode.ts
 
 diff --git a/core/config/profile/doLoadConfig.ts b/core/config/profile/doLoadConfig.ts
 index b2fd4ed08..1150ce150 100644
@@ -87,21 +123,23 @@ index b2fd4ed08..1150ce150 100644
  
    const serializableStatuses = mcpServerStatuses.map((server) => {
 diff --git a/core/context/mcp/MCPManagerSingleton.ts b/core/context/mcp/MCPManagerSingleton.ts
-index cac57e1e6..cb71af82d 100644
+index cac57e1e6..e17aa9bfc 100644
 --- a/core/context/mcp/MCPManagerSingleton.ts
 +++ b/core/context/mcp/MCPManagerSingleton.ts
-@@ -10,6 +10,7 @@ export class MCPManagerSingleton {
+@@ -10,6 +10,8 @@ export class MCPManagerSingleton {
    public connections: Map<string, MCPConnection> = new Map();
  
    private abortController: AbortController = new AbortController();
 +  private refreshPromise: Promise<void> = Promise.resolve();
++  private hasWaitedForConnections = false;
  
    private constructor() {}
  
-@@ -155,22 +156,40 @@ export class MCPManagerSingleton {
+@@ -155,25 +157,65 @@ export class MCPManagerSingleton {
    async refreshConnections(force: boolean) {
      this.abortController.abort();
      this.abortController = new AbortController();
++    this.hasWaitedForConnections = false;
 +    const run = (async () => {
 +      await Promise.all(
 +        Array.from(this.connections.values()).map(async (connection) => {
@@ -113,11 +151,14 @@ index cac57e1e6..cb71af82d 100644
 +    // Notify after the connection promise has settled. The callback reloads
 +    // config, which calls waitForConnections(); notifying inside `run` would
 +    // make it await itself and stall every reload for the full timeout.
-+    void run.then(() => {
-+      if (this.onConnectionsRefreshed) {
-+        this.onConnectionsRefreshed();
-+      }
-+    });
++    void run
++      .then(
++        () => this.onConnectionsRefreshed?.(),
++        // A failed connection still has error statuses to display; reload
++        // config instead of leaving an unhandled rejection behind.
++        () => this.onConnectionsRefreshed?.(),
++      )
++      .catch(() => undefined);
      await Promise.race([
        new Promise((resolve) => {
          this.abortController.signal.addEventListener("abort", () => {
@@ -135,20 +176,41 @@ index cac57e1e6..cb71af82d 100644
 -        }
 -      })(),
 +      run,
-+    ]);
-+  }
-+
+     ]);
+   }
+ 
 +  /**
 +   * Wait for the initial MCP handshakes so config loading includes their
 +   * tools. Bounded so a broken server cannot freeze the extension.
 +   */
 +  async waitForConnections(timeoutMs = 8000): Promise<void> {
-+    await Promise.race([
-+      this.refreshPromise.catch(() => undefined),
-+      new Promise<void>((resolve) => setTimeout(resolve, timeoutMs)),
-     ]);
-   }
- 
++    // Wait at most once per refresh. Otherwise a single hanging MCP server
++    // would add its full timeout to every subsequent request.
++    if (this.hasWaitedForConnections) {
++      return;
++    }
++    this.hasWaitedForConnections = true;
++
++    let timer: ReturnType<typeof setTimeout> | undefined;
++    try {
++      await Promise.race([
++        this.refreshPromise.catch(() => undefined),
++        new Promise<void>((resolve) => {
++          timer = setTimeout(resolve, timeoutMs);
++          // Never keep the extension host alive just for this bounded wait.
++          (timer as any).unref?.();
++        }),
++      ]);
++    } finally {
++      if (timer) {
++        clearTimeout(timer);
++      }
++    }
++  }
++
+   getStatuses(): (MCPServerStatus & { client: Client })[] {
+     return Array.from(this.connections.values()).map((connection) => ({
+       ...connection.getStatus(),
 diff --git a/core/core.ts b/core/core.ts
 index 93db22182..c8adab26e 100644
 --- a/core/core.ts
@@ -186,28 +248,59 @@ index 93db22182..c8adab26e 100644
          const preprocessedArgs = await tool.preprocessArgs?.(normalizedArgs, {
            ide: this.ide,
          });
+diff --git a/core/index.d.ts b/core/index.d.ts
+index 502ae4201..58be62794 100644
+--- a/core/index.d.ts
++++ b/core/index.d.ts
+@@ -1737,7 +1737,7 @@ export interface ExperimentalConfig {
+   streamIdleTimeoutMs?: number;
+   /**
+    * Maximum number of agent tool turns for VS Code and CN. 0 disables the
+-   * protection. Default: 25.
++   * protection. Default: 100.
+    */
+   maxAgentTurns?: number;
+ }
 diff --git a/core/llm/defaultSystemMessages.ts b/core/llm/defaultSystemMessages.ts
-index 341b37393..420886315 100644
+index 341b37393..18e59891c 100644
 --- a/core/llm/defaultSystemMessages.ts
 +++ b/core/llm/defaultSystemMessages.ts
-@@ -72,6 +72,12 @@ export const DEFAULT_AGENT_SYSTEM_MESSAGE = `\
+@@ -70,8 +70,28 @@ export const DEFAULT_AGENT_SYSTEM_MESSAGE = `\
+   Do not mix planning narration with tool calls. Use text to request clarification,
+   explain completed results, or provide the final answer.
    Do not repeat an action with the same tool arguments if the result is unchanged.
-   If a task requires more context, use a targeted read or search and stop after each
-   tool result instead of narrating the next step.
+-  If a task requires more context, use a targeted read or search and stop after each
+-  tool result instead of narrating the next step.
++  If a task requires more context, use targeted reads or searches. Independent
++  read-only calls may run together; do not narrate the next step between calls.
 +  When you need a clarification, a preference or a decision from the user, call
 +  AskQuestion instead of writing a question in prose and ending the turn.
 +  To modify existing files, prefer ApplyPatch (one atomic patch, multiple files);
-+  use edit_existing_file for a small exact replacement and create_new_file only for
-+  a new file or a complete rewrite. Do not use run_terminal_command with sed, awk,
-+  cat, echo, tee or Python to modify project files.
++  use single_find_and_replace or multi_edit for a small exact replacement. Use
++  create_new_file only for a brand-new file; to fully rewrite an existing file,
++  use ApplyPatch or edit_existing_file. Do not use run_terminal_command with sed,
++  awk, cat, echo, tee or Python to modify project files.
++  Tool selection (only use tools that are present in the available tool list;
++  never invent a tool):
++  - Read a known file with read_file; use read_file_range for a large file or a
++    known line range, and ReadManyFiles for several files.
++  - Find text with grep_search (set fixedStrings for literal text); find file
++    paths with file_glob_search; inspect a directory with ls. Use codebase for
++    semantic search and GetReferences/GetDefinition/SearchWorkspaceSymbols for
++    symbol navigation when available.
++  - Use single_find_and_replace only for one exact replacement; multi_edit for
++    several exact replacements in one file; edit_existing_file only after
++    reading the file, for a context-aware edit.
++  - Use run_terminal_command for builds, tests, git and package managers only.
++  - If you have not read the file or range you are about to edit, read it first.
  
  ${CODEBLOCK_FORMATTING_INSTRUCTIONS}
  
 diff --git a/core/tools/callTool.ts b/core/tools/callTool.ts
-index b8b3a9753..33ac7485e 100644
+index b8b3a9753..fbe8e440f 100644
 --- a/core/tools/callTool.ts
 +++ b/core/tools/callTool.ts
-@@ -43,7 +43,11 @@ import { viewDiffImpl } from "./implementations/viewDiff";
+@@ -43,7 +43,10 @@ import { viewDiffImpl } from "./implementations/viewDiff";
  import { viewRepoMapImpl } from "./implementations/viewRepoMap";
  import { viewSubdirectoryImpl } from "./implementations/viewSubdirectory";
  import { coerceArgsToSchema, safeParseToolCallArgs } from "./parseArgs";
@@ -216,11 +309,10 @@ index b8b3a9753..33ac7485e 100644
 +  normalizeToolArguments,
 +  repairToolArguments,
 +} from "./toolCallSanitization";
-+import { buildToolUsageReminder } from "./toolArgumentValidation";
  
  async function callHttpTool(
    url: string,
-@@ -297,8 +301,11 @@ export async function callTool(
+@@ -297,8 +300,11 @@ export async function callTool(
    mcpUiState?: McpUiState;
  }> {
    try {
@@ -234,18 +326,16 @@ index b8b3a9753..33ac7485e 100644
        tool.function.parameters,
      );
      const { contextItems, mcpUiState } = tool.uri
-@@ -327,6 +334,9 @@ export async function callTool(
+@@ -327,7 +333,6 @@ export async function callTool(
      } else if (e instanceof Error) {
        errorMessage = e.message;
      }
-+    errorMessage = `${errorMessage}
-+
-+${buildToolUsageReminder(tool)}`;
- 
+-
      return {
        contextItems: [],
+       errorMessage,
 diff --git a/core/tools/definitions/applyPatch.ts b/core/tools/definitions/applyPatch.ts
-index 2e8f6c992..0388e6ffc 100644
+index 2e8f6c992..4ecc30904 100644
 --- a/core/tools/definitions/applyPatch.ts
 +++ b/core/tools/definitions/applyPatch.ts
 @@ -13,7 +13,7 @@ export const applyPatchTool: Tool = {
@@ -253,7 +343,7 @@ index 2e8f6c992..0388e6ffc 100644
      name: BuiltInToolNames.ApplyPatch,
      description:
 -      "Apply an atomic unified patch to one or more existing files. Do not use this tool for new files; use CreateNewFile/Write.",
-+      "Apply an atomic unified patch to one or more EXISTING files. Prefer this tool when modifying existing files: it accepts *** Begin Patch / *** Update File sections and standard unified diffs, and applies all hunks atomically. Do not use it for new files; use CreateNewFile/Write.",
++      "Apply an atomic unified patch to one or more EXISTING files. Prefer this tool when modifying existing files: it accepts *** Begin Patch / *** Update File sections and standard unified diffs, and applies all hunks atomically. Do not use it for new files; use create_new_file instead.",
      parameters: {
        type: "object",
        required: ["patch"],
@@ -272,28 +362,183 @@ index 2e8f6c992..0388e6ffc 100644
 +  },
 +  toolCallIcon: "CodeBracketIcon",
  };
+diff --git a/core/tools/definitions/askQuestion.ts b/core/tools/definitions/askQuestion.ts
+index 3aa325afb..d17770c04 100644
+--- a/core/tools/definitions/askQuestion.ts
++++ b/core/tools/definitions/askQuestion.ts
+@@ -41,6 +41,7 @@ export const askQuestionTool: Tool = {
+   systemMessageDescription: {
+     prefix:
+       "To ask the user a clarification question, use AskQuestion with a concise question.",
++    exampleArgs: [["question", "Which option should I use?"]],
+   },
+   toolCallIcon: "QuestionMarkCircleIcon",
+ };
+diff --git a/core/tools/definitions/grepSearch.ts b/core/tools/definitions/grepSearch.ts
+index bcd5363c6..7160977a9 100644
+--- a/core/tools/definitions/grepSearch.ts
++++ b/core/tools/definitions/grepSearch.ts
+@@ -13,7 +13,7 @@ export const grepSearchTool: Tool = {
+   function: {
+     name: BuiltInToolNames.GrepSearch,
+     description:
+-      "Performs a regular expression (regex) search over the repository using ripgrep. Will not include results for many build, cache, secrets dirs/files. Output may be truncated, so use targeted queries",
++      "Performs a regular expression (regex) search over file contents using ripgrep. Set fixedStrings=true for literal text. Use file_glob_search to find file paths and ls to inspect a directory. Will not include results for many build, cache, secrets dirs/files. Output may be truncated, so use targeted queries.",
+     parameters: {
+       type: "object",
+       required: ["query"],
+diff --git a/core/tools/definitions/ls.ts b/core/tools/definitions/ls.ts
+index 72daf7cef..2cf7bd970 100644
+--- a/core/tools/definitions/ls.ts
++++ b/core/tools/definitions/ls.ts
+@@ -16,7 +16,8 @@ export const lsTool: Tool = {
+   group: BUILT_IN_GROUP_NAME,
+   function: {
+     name: BuiltInToolNames.LSTool,
+-    description: "List files and folders in a given directory",
++    description:
++      "List files and folders in a given directory. Use file_glob_search to find files by path pattern; use ls to inspect one directory.",
+     parameters: {
+       type: "object",
+       properties: {
+diff --git a/core/tools/definitions/readFileRange.ts b/core/tools/definitions/readFileRange.ts
+index 2c573c72d..fdd68f8f0 100644
+--- a/core/tools/definitions/readFileRange.ts
++++ b/core/tools/definitions/readFileRange.ts
+@@ -19,7 +19,7 @@ export const readFileRangeTool: Tool = {
+   function: {
+     name: BuiltInToolNames.ReadFileRange,
+     description:
+-      "Use this tool to read a specific range of lines from an existing file. Only supports positive line numbers (1-based from start). For reading from the end of a file, use the terminal tool with 'tail' command instead.",
++      "Use this tool to read a specific range of lines from an existing file. Only supports positive line numbers (1-based from start). If you do not know the line count, use grep_search to locate the target or read the file first.",
+     parameters: {
+       type: "object",
+       required: ["filepath", "startLine", "endLine"],
+@@ -30,12 +30,12 @@ export const readFileRangeTool: Tool = {
+             "The path of the file to read, relative to the root of the workspace (NOT uri or absolute path)",
+         },
+         startLine: {
+-          type: "number",
++          type: "integer",
+           description:
+             "The starting line number (1-based from start). Must be a positive integer. Example: 1 = first line, 10 = tenth line",
+         },
+         endLine: {
+-          type: "number",
++          type: "integer",
+           description:
+             "The ending line number (1-based from start). Must be a positive integer greater than or equal to startLine. Example: 10 = tenth line, 20 = twentieth line",
+         },
+@@ -43,7 +43,7 @@ export const readFileRangeTool: Tool = {
+     },
+   },
+   systemMessageDescription: {
+-    prefix: `To read a specific range of lines from a file, use the ${BuiltInToolNames.ReadFileRange} tool. Only supports positive line numbers (1-based from start). For reading from the end of files, use the terminal tool with 'tail' command instead:`,
++    prefix: `To read a specific range of lines from a file, use the ${BuiltInToolNames.ReadFileRange} tool. Only supports positive line numbers (1-based from start). If you do not know the line count, read the file first:`,
+     exampleArgs: [
+       ["filepath", "path/to/the_file.txt"],
+       ["startLine", 10],
+diff --git a/core/tools/definitions/runTerminalCommand.ts b/core/tools/definitions/runTerminalCommand.ts
+index ec7e29466..1243104b3 100644
+--- a/core/tools/definitions/runTerminalCommand.ts
++++ b/core/tools/definitions/runTerminalCommand.ts
+@@ -29,7 +29,7 @@ const RUN_COMMAND_NOTES = `The shell is not stateful and will not remember any p
+       When a command is run in the background ALWAYS suggest using shell commands to stop it; NEVER suggest using Ctrl+C.\
+       When suggesting subsequent shell commands ALWAYS format them in shell command blocks.\
+       Do NOT perform actions requiring special/admin privileges.\
+-      IMPORTANT: To edit files, use Edit/MultiEdit tools instead of bash commands (sed, awk, etc).\
++      IMPORTANT: To edit files, use ApplyPatch, single_find_and_replace, multi_edit or create_new_file instead of bash commands (sed, awk, cat >, echo >, tee, etc).\
+       ${PLATFORM_INFO}`;
+ 
+ export const runTerminalCommandTool: Tool = {
+diff --git a/core/tools/implementations/applyPatch.ts b/core/tools/implementations/applyPatch.ts
+index 263603046..08a8bc205 100644
+--- a/core/tools/implementations/applyPatch.ts
++++ b/core/tools/implementations/applyPatch.ts
+@@ -124,6 +124,25 @@ function applyCustomHunks(source: string, body: string[]): string {
+ 
+ export const applyPatchImpl: ToolImpl = async (args, extras) => {
+   const patch = getStringArg(args, "patch");
++
++  // The prompt advertises ApplyPatch for existing files only. Reject other
++  // patch sections instead of silently ignoring them (which previously made
++  // a Delete/Move look successful while leaving the file untouched).
++  if (/^\*\*\* Add File:/m.test(patch) || /^--- \/dev\/null$/m.test(patch)) {
++    throw new Error(
++      "ApplyPatch cannot create files. Use create_new_file for a new file.",
++    );
++  }
++  if (
++    /^\*\*\* Delete File:/m.test(patch) ||
++    /^\+\+\+ \/dev\/null$/m.test(patch)
++  ) {
++    throw new Error("ApplyPatch cannot delete files.");
++  }
++  if (/^\*\*\* Move to:/m.test(patch)) {
++    throw new Error("ApplyPatch cannot move files.");
++  }
++
+   let files = parseBeginPatch(patch);
+   if (files.length === 0 && isUnifiedDiffFormat(patch)) {
+     files = parseUnifiedFiles(patch);
+diff --git a/core/tools/implementations/grepSearch.ts b/core/tools/implementations/grepSearch.ts
+index 40290defc..cdb7b8cea 100644
+--- a/core/tools/implementations/grepSearch.ts
++++ b/core/tools/implementations/grepSearch.ts
+@@ -79,7 +79,7 @@ export const grepSearchImpl: ToolImpl = async (args, extras) => {
+         {
+           name: "Search error",
+           description: "The search query could not be processed",
+-          content: `The search failed due to an invalid regex pattern.\n\nOriginal query: ${rawQuery}\nProcessed query: ${query}\n\nError: ${errorMessage}\n\nTip: If you're searching for literal text with special characters, the query was automatically escaped. If you need regex patterns, ensure they use proper regex syntax.`,
++          content: `The search failed due to an invalid regex pattern.\n\nOriginal query: ${rawQuery}\nProcessed query: ${query}\n\nError: ${errorMessage}\n\nTip: If you're searching for literal text, set fixedStrings: true. If you need regex patterns, ensure they use proper regex syntax.`,
+         },
+       ];
+     }
 diff --git a/core/tools/systemMessageTools/toolCodeblocks/index.ts b/core/tools/systemMessageTools/toolCodeblocks/index.ts
-index 44c8e6921..022368417 100644
+index 44c8e6921..92b6d6f16 100644
 --- a/core/tools/systemMessageTools/toolCodeblocks/index.ts
 +++ b/core/tools/systemMessageTools/toolCodeblocks/index.ts
-@@ -83,7 +83,10 @@ Do not mix planning narration with tool calls.`;
+@@ -75,15 +75,19 @@ Do not mix planning narration with tool calls.`;
+   systemMessageSuffix = `RULES FOR TOOL USE:
+ 1. To call a tool, output a tool code block using EXACTLY the format shown above.
+ 2. Always start the code block on a new line.
+-3. You can only call ONE tool at a time.
+-4. The tool code block MUST be the last thing in your response. Stop immediately after the closing fence.
++3. You may emit several tool blocks in one response when the calls are independent read-only operations. Emit write or edit calls one at a time.
++4. All tool code blocks MUST be at the end of your response. Stop immediately after the last closing fence.
+ 5. Do NOT wrap tool calls in XML tags like <tool_call> or <function=...>.
+ 6. Do NOT use JSON format for tool calls.
+ 7. Do NOT invent tools that are not listed above.
  8. If the user's request can be addressed with a listed tool, use it rather than guessing.
  9. Do not perform actions with hypothetical files. Use tools to find relevant files.
  10. Do not repeat the same tool call with the same arguments when it produces no new result.
 -11. Use prose only for clarification, a concise tool result summary, or the final answer.`;
 +11. Use prose only for clarification, a concise tool result summary, or the final answer.
 +12. Every required argument must be present. If a call is rejected for invalid or missing arguments, read the schema in the error, fix the arguments, and call it again. Never repeat the same invalid call.
-+13. To modify existing files, prefer ApplyPatch (one atomic patch, multiple files). Use edit_existing_file for a small exact replacement and create_new_file only for a new file or a complete rewrite. Do not use run_terminal_command with sed, awk, cat, echo, tee or Python to modify project files.
-+14. When you need a clarification, a preference or a decision from the user, call AskQuestion instead of writing a question in prose and ending the turn.`;
++13. If write tools are available and the user asks to modify files, prefer ApplyPatch (one atomic patch, multiple files). Use single_find_and_replace or multi_edit for a small exact replacement. Use create_new_file only for a brand-new file; to fully rewrite an existing file, use ApplyPatch or edit_existing_file. Do not use run_terminal_command with sed, awk, cat, echo, tee or Python to modify project files.
++14. When you need a clarification, a preference or a decision from the user, call AskQuestion instead of writing a question in prose and ending the turn.
++15. Choose the most specific available tool: read_file/read_file_range for reading, grep_search for text search, file_glob_search for file paths, ls for a directory, ApplyPatch for existing files, single_find_and_replace/multi_edit for exact replacements, and create_new_file only for a brand-new file (use these write tools only when they are present). Use run_terminal_command only for commands that have no dedicated tool, and never for file edits.`;
  
    exampleDynamicToolDefinition = `
  \`\`\`tool_definition
+@@ -140,9 +144,6 @@ export function looksLikeToolAnnouncement(content: string): boolean {
+   const announcements =
+     /\b(i(?:'|’)ll|i will|i'm going to|i am going to|let me|i need to|i should|i have to|next i(?:'|’)ll|je vais|je dois|je vais devoir|j'utilise|je vais utiliser)\b/i;
+   const actionWords =
+-    /\b(read|search|inspect|analyze|analyse|edit|modify|run|grep|glob|list|check|fetch|open)\w*\b/i;
+-  return (
+-    announcements.test(lower) ||
+-    (actionWords.test(lower) && lower.length < 600)
+-  );
++    /\b(read|search|inspect|analyze|analyse|edit|modify|run|grep|glob|list|check|fetch|open|lire|chercher|modifier|exécuter|verifier|vérifier|ouvrir|analyser)\w*\b/i;
++  return announcements.test(lower) && actionWords.test(lower);
+ }
 diff --git a/core/tools/toolArgumentValidation.ts b/core/tools/toolArgumentValidation.ts
 new file mode 100644
-index 000000000..3e51a12d5
+index 000000000..ea694e64e
 --- /dev/null
 +++ b/core/tools/toolArgumentValidation.ts
-@@ -0,0 +1,187 @@
+@@ -0,0 +1,223 @@
 +import { Tool } from "..";
 +
 +export interface ToolArgumentIssue {
@@ -356,11 +601,13 @@ index 000000000..3e51a12d5
 +
 +  if (schema.type === "string" && typeof value !== "string") {
 +    issues.push({ path, message: "must be a string" });
-+  } else if (
-+    (schema.type === "number" || schema.type === "integer") &&
-+    typeof value !== "number"
-+  ) {
++  } else if (schema.type === "number" && typeof value !== "number") {
 +    issues.push({ path, message: "must be a number" });
++  } else if (
++    schema.type === "integer" &&
++    (typeof value !== "number" || !Number.isSafeInteger(value))
++  ) {
++    issues.push({ path, message: "must be an integer" });
 +  } else if (schema.type === "boolean" && typeof value !== "boolean") {
 +    issues.push({ path, message: "must be a boolean" });
 +  }
@@ -383,6 +630,9 @@ index 000000000..3e51a12d5
 +        filepath: "path/to/file.ts",
 +        file_path: "path/to/file.ts",
 +        path: "path/to/file.ts",
++        dirPath: "path/to/directory",
++        dirpath: "path/to/directory",
++        directory_path: "path/to/directory",
 +        old_string: "exact existing text",
 +        new_string: "replacement text",
 +        content: "file content",
@@ -404,9 +654,13 @@ index 000000000..3e51a12d5
 +    case "array":
 +      return [sampleValue(name, schema.items ?? {})];
 +    case "object": {
++      const properties = schema.properties ?? {};
++      const required = schema.required?.length
++        ? schema.required
++        : Object.keys(properties);
 +      const value: Record<string, any> = {};
-+      for (const key of schema.required ?? []) {
-+        value[key] = sampleValue(key, schema.properties?.[key] ?? {});
++      for (const key of required) {
++        value[key] = sampleValue(key, properties[key] ?? {});
 +      }
 +      return value;
 +    }
@@ -414,6 +668,39 @@ index 000000000..3e51a12d5
 +      return `<${name}>`;
 +  }
 +}
++
++function exampleArguments(tool: Tool): Array<[string, any]> {
++  const parameters = tool.function.parameters;
++  const properties = parameters?.properties ?? {};
++  const required: string[] = parameters?.required?.length
++    ? parameters.required
++    : Object.keys(properties);
++  return required.map((key) => [
++    key,
++    sampleValue(key, properties[key] ?? {}),
++  ]);
++}
++
++function exampleArgumentsObject(tool: Tool): Record<string, any> {
++  return Object.fromEntries(exampleArguments(tool));
++}
++
++/**
++ * The GUI parses the TOOL_NAME/BEGIN_ARG/END_ARG codeblock format (see
++ * SystemMessageToolCodeblocksFramework) when text tool mode is active. Native
++ * mode keeps the API's function-calling format, so the reminder must not
++ * prescribe a text block there.
++ */
++function formatSystemToolExample(tool: Tool): string[] {
++  const lines = ["```tool", `TOOL_NAME: ${tool.function.name}`];
++  for (const [key, value] of exampleArguments(tool)) {
++    lines.push(`BEGIN_ARG: ${key}`, JSON.stringify(value), "END_ARG");
++  }
++  lines.push("```");
++  return lines;
++}
++
++export type ToolReminderFormat = "native" | "text";
 +
 +export function buildToolCallRejectionMessage(
 +  tool: Tool,
@@ -426,14 +713,6 @@ index 000000000..3e51a12d5
 +  const required = tool.function.parameters?.required?.length
 +    ? tool.function.parameters.required.join(", ")
 +    : "none";
-+  const example = {
-+    name: tool.function.name,
-+    arguments: sampleValue("arguments", {
-+      type: "object",
-+      properties: tool.function.parameters?.properties ?? {},
-+      required: tool.function.parameters?.required ?? [],
-+    }),
-+  };
 +
 +  return [
 +    `Tool call rejected before execution: "${tool.function.name}".`,
@@ -445,10 +724,8 @@ index 000000000..3e51a12d5
 +    `Required: ${required}`,
 +    `Schema: ${JSON.stringify(tool.function.parameters)}`,
 +    "",
-+    "Correct example:",
-+    "```tool",
-+    JSON.stringify(example, null, 2),
-+    "```",
++    "Example arguments (JSON):",
++    JSON.stringify(exampleArgumentsObject(tool), null, 2),
 +    "",
 +    "Fix the arguments and call the tool again. Do not repeat the same invalid call.",
 +  ].join("\n");
@@ -458,40 +735,45 @@ index 000000000..3e51a12d5
 + * Compact syntax reminder appended to tool execution errors so the model can
 + * correct a call instead of repeating it or falling back to Bash.
 + */
-+export function buildToolUsageReminder(tool: Tool): string {
++export function buildToolUsageReminder(
++  tool: Tool,
++  format: ToolReminderFormat = "native",
++): string {
 +  const required = tool.function.parameters?.required?.length
 +    ? tool.function.parameters.required.join(", ")
 +    : "none";
-+  const example = {
-+    name: tool.function.name,
-+    arguments: sampleValue("arguments", {
-+      type: "object",
-+      properties: tool.function.parameters?.properties ?? {},
-+      required: tool.function.parameters?.required ?? [],
-+    }),
-+  };
++
++  const example =
++    format === "text"
++      ? [
++          "Example:",
++          ...formatSystemToolExample(tool),
++          "Call the tool again with this syntax and all required arguments.",
++        ]
++      : [
++          "Example arguments (JSON):",
++          JSON.stringify(exampleArgumentsObject(tool), null, 2),
++          "Call the tool again using the same native tool-calling interface, with all required arguments.",
++        ];
 +
 +  return [
 +    `Tool usage reminder for "${tool.function.name}":`,
 +    `Required: ${required}`,
-+    "Example:",
-+    "```tool",
-+    JSON.stringify(example, null, 2),
-+    "```",
-+    "Call the tool again with this syntax and all required arguments.",
++    ...example,
 +  ].join("\n");
 +}
 diff --git a/core/tools/toolArgumentValidation.vitest.ts b/core/tools/toolArgumentValidation.vitest.ts
 new file mode 100644
-index 000000000..8c23f5ffa
+index 000000000..b8ec23a27
 --- /dev/null
 +++ b/core/tools/toolArgumentValidation.vitest.ts
-@@ -0,0 +1,87 @@
+@@ -0,0 +1,138 @@
 +import { describe, expect, it } from "vitest";
 +
 +import { Tool } from "..";
 +import {
 +  buildToolCallRejectionMessage,
++  buildToolUsageReminder,
 +  validateToolArguments,
 +} from "./toolArgumentValidation";
 +
@@ -570,12 +852,62 @@ index 000000000..8c23f5ffa
 +
 +    expect(message).toContain("Tool call rejected before execution");
 +    expect(message).toContain("Required: filepath");
++    expect(message).toContain("Example arguments (JSON)");
 +    expect(message).toContain('"filepath": "path/to/file.ts"');
 +    expect(message).toContain("Do not repeat the same invalid call");
 +  });
++
++  it("shows optional parameters when the tool has no required list", () => {
++    const testTool = tool({
++      type: "object",
++      properties: {
++        filepath: { type: "string" },
++        offset: { type: "number" },
++      },
++    });
++    const message = buildToolCallRejectionMessage(
++      testTool,
++      {},
++      [{ path: "filepath", message: "missing required parameter" }],
++    );
++
++    expect(message).toContain('"filepath"');
++    expect(message).toContain('"offset"');
++  });
++
++  it("uses the session tool syntax in reminders", () => {
++    const testTool = tool({
++      type: "object",
++      required: ["filepath"],
++      properties: { filepath: { type: "string" } },
++    });
++
++    const textReminder = buildToolUsageReminder(testTool, "text");
++    expect(textReminder).toContain("TOOL_NAME: TestTool");
++    expect(textReminder).toContain("BEGIN_ARG: filepath");
++    expect(textReminder).toContain("END_ARG");
++
++    const nativeReminder = buildToolUsageReminder(testTool, "native");
++    expect(nativeReminder).toContain("Example arguments (JSON)");
++    expect(nativeReminder).not.toContain("BEGIN_ARG");
++    expect(nativeReminder).toContain('"filepath": "path/to/file.ts"');
++  });
++
++  it("rejects non-integer values for integer schemas", () => {
++    const issues = validateToolArguments(
++      tool({
++        type: "object",
++        required: ["count"],
++        properties: { count: { type: "integer" } },
++      }),
++      { count: 1.5 },
++    );
++
++    expect(issues).toEqual([{ path: "count", message: "must be an integer" }]);
++  });
 +});
 diff --git a/core/tools/toolCallSanitization.ts b/core/tools/toolCallSanitization.ts
-index db944dd79..92ad29305 100644
+index db944dd79..c6bbaf081 100644
 --- a/core/tools/toolCallSanitization.ts
 +++ b/core/tools/toolCallSanitization.ts
 @@ -74,11 +74,10 @@ export function mergeToolName(current: string, delta: string): string {
@@ -593,7 +925,7 @@ index db944dd79..92ad29305 100644
    read_file: ["Read", "readFile", "read"],
    read_file_range: ["ReadRange", "readRange"],
    ls: ["List", "ListDirectory", "listFiles", "listDirectory", "list"],
-@@ -98,15 +97,21 @@ const READ_ONLY_TOOL_ALIASES: Record<string, readonly string[]> = {
+@@ -98,31 +97,39 @@ const READ_ONLY_TOOL_ALIASES: Record<string, readonly string[]> = {
    get_definition: ["GetDefinition", "getDefinition", "GoToDefinition", "gotoDefinition"],
    search_workspace_symbols: ["SearchWorkspaceSymbols", "searchWorkspaceSymbols", "WorkspaceSymbols"],
    apply_patch: ["ApplyPatch", "applyPatch", "Patch"],
@@ -613,11 +945,41 @@ index db944dd79..92ad29305 100644
    const lower = name.toLowerCase();
  
 -  for (const [canonical, aliases] of Object.entries(READ_ONLY_TOOL_ALIASES)) {
+-    const canonicalAvailable = availableNames.find(
+-      (available) => available.toLowerCase() === canonical,
 +  for (const [canonical, aliases] of Object.entries(TOOL_NAME_ALIASES)) {
-     const canonicalAvailable = availableNames.find(
-       (available) => available.toLowerCase() === canonical,
++    // Treat the canonical name and all aliases as one equivalence group.
++    // This maps in both directions (Grep -> Search, Write -> create_new_file,
++    // etc.) instead of only canonical -> alias.
++    const group = [canonical, ...aliases];
++    const inputMatches = group.some(
++      (candidate) => candidate.toLowerCase() === lower,
      );
-@@ -160,9 +165,9 @@ export function resolveToolName(
+-    if (
+-      canonicalAvailable &&
+-      (lower === canonical ||
+-        aliases.some((alias) => alias.toLowerCase() === lower))
+-    ) {
+-      return canonicalAvailable;
++    if (!inputMatches) {
++      continue;
+     }
+ 
+-    const aliasAvailable = availableNames.find((available) =>
+-      aliases.some((alias) => alias.toLowerCase() === available.toLowerCase()),
++    const available = availableNames.find((candidate) =>
++      group.some(
++        (groupName) => groupName.toLowerCase() === candidate.toLowerCase(),
++      ),
+     );
+-    if (aliasAvailable && lower === canonical) {
+-      return aliasAvailable;
++    if (available) {
++      return available;
+     }
+   }
+ 
+@@ -160,9 +167,9 @@ export function resolveToolName(
      }
    }
  
@@ -630,7 +992,74 @@ index db944dd79..92ad29305 100644
    }
  
    // Longest first so that e.g. "ReadFile" wins over "Read".
-@@ -355,7 +360,9 @@ const ARGUMENT_ALIASES: Record<string, readonly string[]> = {
+@@ -283,6 +290,46 @@ function parseXmlToolArguments(raw: string): Record<string, any> | undefined {
+   return Object.keys(args).length > 0 ? args : undefined;
+ }
+ 
++/**
++ * Some models put literal newlines inside JSON string values (especially
++ * multi-line patches), which is invalid JSON. Escape only the newlines that
++ * are inside strings; structural whitespace is left untouched.
++ */
++function escapeNewlinesInsideJsonStrings(raw: string): string {
++  let result = "";
++  let inString = false;
++  let escaped = false;
++  for (const char of raw) {
++    if (!inString) {
++      if (char === '"') {
++        inString = true;
++      }
++      result += char;
++      continue;
++    }
++
++    if (escaped) {
++      escaped = false;
++      result += char;
++      continue;
++    }
++    if (char === "\\") {
++      escaped = true;
++      result += char;
++    } else if (char === '"') {
++      inString = false;
++      result += char;
++    } else if (char === "\n") {
++      result += "\\n";
++    } else if (char === "\r") {
++      result += "\\r";
++    } else {
++      result += char;
++    }
++  }
++  return result;
++}
++
+ /**
+  * Best-effort parse of tool-call arguments.
+  * Returns undefined when the string is not a complete JSON object yet and
+@@ -321,7 +368,18 @@ export function tryParseToolArguments(
+         return parsed;
+       }
+     } catch {
+-      // Not complete yet; fall through to the XML parser.
++      try {
++        const repaired = JSON.parse(escapeNewlinesInsideJsonStrings(json));
++        if (
++          repaired &&
++          typeof repaired === "object" &&
++          !Array.isArray(repaired)
++        ) {
++          return repaired;
++        }
++      } catch {
++        // Not complete yet; fall through to the XML parser.
++      }
+     }
+   }
+ 
+@@ -355,7 +413,9 @@ const ARGUMENT_ALIASES: Record<string, readonly string[]> = {
    replace_all: ["replaceAll", "replaceall"],
    command: ["cmd"],
    pattern: ["query", "regex"],
@@ -641,7 +1070,7 @@ index db944dd79..92ad29305 100644
    filepaths: ["files", "paths", "file_paths"],
    maxCharsPerFile: ["max_chars", "maxChars", "limitPerFile"],
    statOnly: ["stat_only", "summaryOnly"],
-@@ -391,9 +398,13 @@ export function normalizeToolArguments(
+@@ -391,9 +451,13 @@ export function normalizeToolArguments(
  
    const properties = schema?.properties;
    const normalized: Record<string, any> = { ...args };
@@ -658,7 +1087,7 @@ index db944dd79..92ad29305 100644
  
    for (const canonical of canonicalKeys) {
      if (normalized[canonical] !== undefined) {
-@@ -411,8 +422,153 @@ export function normalizeToolArguments(
+@@ -411,8 +475,153 @@ export function normalizeToolArguments(
      if (alias !== undefined) {
        normalized[canonical] = normalized[alias];
        delete normalized[alias];
@@ -813,7 +1242,7 @@ index db944dd79..92ad29305 100644
 +    : {};
 +}
 diff --git a/core/tools/toolCallSanitization.vitest.ts b/core/tools/toolCallSanitization.vitest.ts
-index 5e19e05d8..0cd669c8b 100644
+index 5e19e05d8..775b1255b 100644
 --- a/core/tools/toolCallSanitization.vitest.ts
 +++ b/core/tools/toolCallSanitization.vitest.ts
 @@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
@@ -824,7 +1253,7 @@ index 5e19e05d8..0cd669c8b 100644
    resolveToolName,
    sanitizeToolName,
    stripTrailingXmlTags,
-@@ -54,12 +55,24 @@ describe("resolveToolName", () => {
+@@ -54,12 +55,31 @@ describe("resolveToolName", () => {
      expect(resolveToolName("Nonexistent", tools)).toBeUndefined();
    });
  
@@ -848,11 +1277,34 @@ index 5e19e05d8..0cd669c8b 100644
 -    expect(resolveToolName("Write", ["create_new_file"])).toBeUndefined();
 +    expect(resolveToolName("List", ["ls"])).toBe("ls");
 +    expect(resolveToolName("Search", ["grep_search"])).toBe("grep_search");
++    // Symmetric aliases: a model trained on another harness may emit Grep
++    // while the CLI exposes Search (and vice versa).
++    expect(resolveToolName("Grep", ["Search"])).toBe("Search");
++    expect(resolveToolName("grep", ["search"])).toBe("search");
++    expect(resolveToolName("WriteFile", ["create_new_file"])).toBe(
++      "create_new_file",
++    );
    });
  });
  
+@@ -102,6 +122,15 @@ describe("tryParseToolArguments", () => {
+   it("returns undefined while JSON is still streaming", () => {
+     expect(tryParseToolArguments('{"filepath":"a.')).toBeUndefined();
+   });
++
++  it("repairs literal newlines inside JSON string values", () => {
++    const raw = '{"patch":"*** Begin Patch\n*** Update File: a.ts\n@@\n-old\n+new\n*** End Patch"}';
++
++    expect(tryParseToolArguments(raw)).toEqual({
++      patch:
++        "*** Begin Patch\n*** Update File: a.ts\n@@\n-old\n+new\n*** End Patch",
++    });
++  });
+ });
+ 
+ describe("stripTrailingXmlTags", () => {
 diff --git a/core/util/messageConversion.ts b/core/util/messageConversion.ts
-index 0e86e2109..6e268f791 100644
+index 0e86e2109..806c8ef16 100644
 --- a/core/util/messageConversion.ts
 +++ b/core/util/messageConversion.ts
 @@ -361,6 +361,7 @@ export function convertFromUnifiedHistory(
@@ -863,7 +1315,7 @@ index 0e86e2109..6e268f791 100644
  ): ChatCompletionMessageParam[] {
    // OpenAI-compatible providers only accept a system message at the very
    // beginning, and litellm rejects any payload where one appears later. The
-@@ -373,6 +374,62 @@ export function convertFromUnifiedHistoryWithSystemMessage(
+@@ -373,6 +374,84 @@ export function convertFromUnifiedHistoryWithSystemMessage(
      (item) => item.message.role !== "system",
    );
  
@@ -882,6 +1334,7 @@ index 0e86e2109..6e268f791 100644
 +        continue;
 +      }
 +
++      let pushedAssistant = false;
 +      for (const converted of convertFromUnifiedHistory([item])) {
 +        if (converted.role === "tool") {
 +          // The text-mode user tool_result below replaces native tool rows.
@@ -897,10 +1350,31 @@ index 0e86e2109..6e268f791 100644
 +              plainAssistant.content.trim().length > 0)
 +          ) {
 +            messages.push(plainAssistant);
++            pushedAssistant = true;
 +          }
 +        } else {
 +          messages.push(converted);
 +        }
++      }
++
++      // Native/imported history may have an empty assistant content with
++      // toolCallStates. Rebuild the text call so the next request stays a
++      // valid assistant -> user(tool_result) sequence.
++      if (
++        item.message.role === "assistant" &&
++        item.toolCallStates?.length &&
++        !pushedAssistant
++      ) {
++        const calls = item.toolCallStates
++          .map(
++            (state) =>
++              `\`\`\`tool\n${JSON.stringify({
++                name: state.toolCall.function.name,
++                arguments: state.parsedArgs ?? {},
++              })}\n\`\`\``,
++          )
++          .join("\n");
++        messages.push({ role: "assistant", content: calls });
 +      }
 +
 +      if (item.message.role === "assistant" && item.toolCallStates?.length) {
@@ -959,10 +1433,10 @@ index a32df3488..0ab67f75a 100644
      } else {
        logger.info(chalk.yellow("No previous session found, starting fresh..."));
 diff --git a/extensions/cli/src/messageConversion.test.ts b/extensions/cli/src/messageConversion.test.ts
-index 46c4f4031..9f8d7e7b2 100644
+index 46c4f4031..0019e8803 100644
 --- a/extensions/cli/src/messageConversion.test.ts
 +++ b/extensions/cli/src/messageConversion.test.ts
-@@ -206,4 +206,54 @@ describe("convertFromUnifiedHistoryWithSystemMessage", () => {
+@@ -206,4 +206,93 @@ describe("convertFromUnifiedHistoryWithSystemMessage", () => {
      });
      expect(result[1]).toEqual({ role: "user", content: "Hello" });
    });
@@ -1015,6 +1489,45 @@ index 46c4f4031..9f8d7e7b2 100644
 +    expect(String(result[3].content)).toContain('<tool_result tool="Read"');
 +    expect(String(result[3].content)).toContain("alpha");
 +    expect(result.some((message) => message.role === "tool")).toBe(false);
++  });
++
++  it("rebuilds a text tool call when imported assistant content is empty", () => {
++    const historyItems: ChatHistoryItem[] = [
++      { message: { role: "user", content: "Read a.txt" }, contextItems: [] },
++      {
++        message: { role: "assistant", content: "" },
++        contextItems: [],
++        toolCallStates: [
++          {
++            toolCallId: "call_1",
++            toolCall: {
++              id: "call_1",
++              type: "function",
++              function: { name: "Read", arguments: '{"filepath":"a.txt"}' },
++            },
++            status: "done",
++            parsedArgs: { filepath: "a.txt" },
++            output: [{ content: "alpha", name: "Read result", description: "" }],
++          },
++        ] as any,
++      },
++    ];
++
++    const result = convertFromUnifiedHistoryWithSystemMessage(
++      historyItems,
++      "Current system prompt",
++      { textToolMode: true },
++    );
++
++    expect(result.map((message) => message.role)).toEqual([
++      "system",
++      "user",
++      "assistant",
++      "user",
++    ]);
++    expect(String(result[2].content)).toContain("```tool");
++    expect(String(result[2].content)).toContain('"name":"Read"');
++    expect(String(result[3].content)).toContain("<tool_result");
 +  });
  });
 diff --git a/extensions/cli/src/permissions/defaultPolicies.ts b/extensions/cli/src/permissions/defaultPolicies.ts
@@ -1077,7 +1590,7 @@ index caeac927f..ba44fc061 100644
    { tool: "Status", permission: "allow" },
    { tool: "UploadArtifact", permission: "allow" },
 diff --git a/extensions/cli/src/services/MCPService.ts b/extensions/cli/src/services/MCPService.ts
-index 016f5bbde..c081af906 100644
+index 016f5bbde..2f495724b 100644
 --- a/extensions/cli/src/services/MCPService.ts
 +++ b/extensions/cli/src/services/MCPService.ts
 @@ -18,6 +18,7 @@ import {
@@ -1088,15 +1601,24 @@ index 016f5bbde..c081af906 100644
    SERVICE_NAMES,
  } from "./types.js";
  
-@@ -41,6 +42,7 @@ export class MCPService
+@@ -41,6 +42,8 @@ export class MCPService
    private isShuttingDown = false;
    private isHeadless: boolean | undefined;
    private apiKeyCache: Map<string, string> = new Map();
 +  private connectionInit: Promise<unknown> = Promise.resolve();
++  private hasWaitedForConnections = false;
  
    getDependencies(): string[] {
      return [SERVICE_NAMES.CONFIG, SERVICE_NAMES.AUTH];
-@@ -78,6 +80,7 @@ export class MCPService
+@@ -70,6 +73,7 @@ export class MCPService
+ 
+     this.assistant = assistant;
+     this.connections.clear();
++    this.hasWaitedForConnections = false;
+ 
+     const connectionPromises = assistant.mcpServers?.map(async (config) => {
+       if (config) {
+@@ -78,6 +82,7 @@ export class MCPService
      });
  
      const connectionInit = Promise.all(connectionPromises ?? []);
@@ -1104,13 +1626,18 @@ index 016f5bbde..c081af906 100644
      if (isHeadless || hasAgentFile) {
        await connectionInit;
  
-@@ -96,12 +99,27 @@ export class MCPService
+@@ -96,12 +101,49 @@ export class MCPService
          }
        }
      } else {
 +      // Do not block the TUI on slow MCP servers, but make the readiness
 +      // promise available so the first LLM request can wait for their tools.
-+      void connectionInit.finally(() => this.updateState());
++      // Handle rejection explicitly: an unhandled rejected promise would
++      // terminate newer Node versions.
++      void connectionInit.then(
++        () => this.updateState(),
++        () => this.updateState(),
++      );
        this.updateState();
      }
  
@@ -1123,16 +1650,33 @@ index 016f5bbde..c081af906 100644
 +   * then proceed with whatever tools are available.
 +   */
 +  async waitForConnections(timeoutMs = 8000): Promise<void> {
-+    await Promise.race([
-+      this.connectionInit.catch(() => undefined),
-+      new Promise<void>((resolve) => setTimeout(resolve, timeoutMs)),
-+    ]);
++    // Wait at most once per initialization. A hanging server must not add
++    // its timeout to every LLM request.
++    if (this.hasWaitedForConnections) {
++      return;
++    }
++    this.hasWaitedForConnections = true;
++
++    let timer: ReturnType<typeof setTimeout> | undefined;
++    try {
++      await Promise.race([
++        this.connectionInit.catch(() => undefined),
++        new Promise<void>((resolve) => {
++          timer = setTimeout(resolve, timeoutMs);
++          (timer as any).unref?.();
++        }),
++      ]);
++    } finally {
++      if (timer) {
++        clearTimeout(timer);
++      }
++    }
 +  }
 +
    /**
     * Update internal state based on current connections
     */
-@@ -115,7 +133,10 @@ export class MCPService
+@@ -115,7 +157,10 @@ export class MCPService
      const tools = connectedServers.flatMap((server) =>
        server.tools.map((tool) => ({
          ...tool,
@@ -1144,7 +1688,7 @@ index 016f5bbde..c081af906 100644
          originalName: tool.name,
        })),
      );
-@@ -190,16 +211,25 @@ export class MCPService
+@@ -190,16 +235,25 @@ export class MCPService
    public async runTool(name: string, args: Record<string, any>) {
      for (const connection of this.connections.values()) {
        if (connection.status === "connected" && connection.client) {
@@ -1235,10 +1779,64 @@ index 95e0afa85..c153c028a 100644
    },
    clear: () => {
 diff --git a/extensions/cli/src/stream/handleToolCalls.ts b/extensions/cli/src/stream/handleToolCalls.ts
-index 8f5b520af..4a82de741 100644
+index 8f5b520af..0ecc4644f 100644
 --- a/extensions/cli/src/stream/handleToolCalls.ts
 +++ b/extensions/cli/src/stream/handleToolCalls.ts
-@@ -182,6 +182,15 @@ export async function getRequestTools(isHeadless: boolean) {
+@@ -3,6 +3,7 @@ import { stripImages } from "core/util/messageContent.js";
+ import { createHistoryItem } from "core/util/messageConversion.js";
+ 
+ import { checkToolPermission } from "src/permissions/permissionChecker.js";
++import type { ToolMode } from "src/permissions/types.js";
+ 
+ import {
+   SERVICE_NAMES,
+@@ -31,13 +32,21 @@ interface HandleToolCallsOptions {
+   callbacks: StreamCallbacks | undefined;
+   isHeadless: boolean;
+   usage?: any;
++  toolMode?: ToolMode;
+ }
+ 
+ export async function handleToolCalls(
+   options: HandleToolCallsOptions,
+ ): Promise<boolean> {
+-  const { toolCalls, chatHistory, content, callbacks, isHeadless, usage } =
+-    options;
++  const {
++    toolCalls,
++    chatHistory,
++    content,
++    callbacks,
++    isHeadless,
++    usage,
++    toolMode = "text",
++  } = options;
+   const chatHistorySvc = services.chatHistory;
+   const useService =
+     typeof chatHistorySvc?.isReady === "function" && chatHistorySvc.isReady();
+@@ -65,7 +74,12 @@ export async function handleToolCalls(
+   // argument aliases, so the assistant message stored in the history already
+   // contains the canonical tool call (not "Read</arg_value>" or "file_path").
+   const { preprocessedCalls, errorChatEntries } =
+-    await preprocessStreamedToolCalls(isHeadless, toolCalls, callbacks);
++    await preprocessStreamedToolCalls(
++      isHeadless,
++      toolCalls,
++      callbacks,
++      toolMode,
++    );
+ 
+   // Create tool call states for the ChatHistoryItem
+   const toolCallStates = toolCalls.map((tc) => ({
+@@ -155,6 +169,7 @@ export async function handleToolCalls(
+     preprocessedCalls,
+     callbacks,
+     isHeadless,
++    toolMode,
+   );
+ 
+   if (isHeadless && hasRejection) {
+@@ -182,6 +197,15 @@ export async function getRequestTools(isHeadless: boolean) {
      return [];
    }
  
@@ -1255,7 +1853,7 @@ index 8f5b520af..4a82de741 100644
  
    const allowedTools: Tool[] = [];
 diff --git a/extensions/cli/src/stream/streamChatResponse.helpers.ts b/extensions/cli/src/stream/streamChatResponse.helpers.ts
-index d87510521..9088bc5e7 100644
+index d87510521..72d4eed63 100644
 --- a/extensions/cli/src/stream/streamChatResponse.helpers.ts
 +++ b/extensions/cli/src/stream/streamChatResponse.helpers.ts
 @@ -6,6 +6,7 @@ import { calculateRequestCost } from "core/llm/utils/calculateRequestCost.js";
@@ -1266,7 +1864,20 @@ index d87510521..9088bc5e7 100644
    resolveToolName,
    tryParseToolArguments,
  } from "core/tools/toolCallSanitization.js";
-@@ -31,6 +32,11 @@ import {
+@@ -16,7 +17,11 @@ import { ToolPermissionServiceState } from "src/services/ToolPermissionService.j
+ 
+ import { checkToolPermission } from "../permissions/permissionChecker.js";
+ import { toolPermissionManager } from "../permissions/permissionManager.js";
+-import { ToolCallRequest, ToolPermissions } from "../permissions/types.js";
++import {
++  ToolCallRequest,
++  ToolMode,
++  ToolPermissions,
++} from "../permissions/types.js";
+ import {
+   SERVICE_NAMES,
+   serviceContainer,
+@@ -31,6 +36,11 @@ import {
    validateToolCallArgsPresent,
  } from "../tools/index.js";
  import { PreprocessedToolCall, ToolCall } from "../tools/types.js";
@@ -1278,7 +1889,15 @@ index d87510521..9088bc5e7 100644
  import { logger } from "../util/logger.js";
  
  import { StreamCallbacks } from "./streamChatResponse.types.js";
-@@ -402,6 +408,7 @@ export async function preprocessStreamedToolCalls(
+@@ -390,6 +400,7 @@ export async function preprocessStreamedToolCalls(
+   isHeadless: boolean,
+   toolCalls: ToolCall[],
+   callbacks?: StreamCallbacks,
++  toolMode: ToolMode = "text",
+ ): Promise<{
+   preprocessedCalls: PreprocessedToolCall[];
+   errorChatEntries: ChatCompletionToolMessageParam[];
+@@ -402,6 +413,7 @@ export async function preprocessStreamedToolCalls(
    // Process each tool call
    for (const toolCall of toolCalls) {
      const startTime = Date.now();
@@ -1286,7 +1905,7 @@ index d87510521..9088bc5e7 100644
      try {
        const availableTools: Tool[] = await getAllAvailableTools(isHeadless);
        // Providers can append XML fragments to the streamed tool name (GLM's
-@@ -428,13 +435,25 @@ export async function preprocessStreamedToolCalls(
+@@ -428,13 +440,26 @@ export async function preprocessStreamedToolCalls(
        if (!tool) {
          throw new Error(`Tool ${toolCall.name} not found`);
        }
@@ -1309,24 +1928,31 @@ index d87510521..9088bc5e7 100644
 +            tool,
 +            toolCall.arguments,
 +            argumentIssues,
++            toolMode,
 +          ),
 +        );
 +      }
        validateToolCallArgsPresent(toolCall, tool);
  
        const preprocessedCall: PreprocessedToolCall = {
-@@ -463,6 +482,10 @@ export async function preprocessStreamedToolCalls(
+@@ -463,6 +488,16 @@ export async function preprocessStreamedToolCalls(
  
        const errorMessage =
          error instanceof Error ? error.message : String(error);
++      const hasSyntaxExample =
++        errorMessage.includes("Correct example") ||
++        errorMessage.includes("Example arguments (JSON)");
 +      const feedback =
-+        resolvedTool && !errorMessage.includes("Correct example")
-+          ? `${errorMessage}\n\n${buildToolUsageReminderForCliTool(resolvedTool)}`
++        resolvedTool && !hasSyntaxExample
++          ? `${errorMessage}\n\n${buildToolUsageReminderForCliTool(
++              resolvedTool,
++              toolMode,
++            )}`
 +          : errorMessage;
  
        logger.error("Invalid tool call", {
          name: toolCall.name,
-@@ -482,11 +505,11 @@ export async function preprocessStreamedToolCalls(
+@@ -482,11 +517,11 @@ export async function preprocessStreamedToolCalls(
        errorChatEntries.push({
          role: "tool",
          tool_call_id: toolCall.id,
@@ -1340,27 +1966,179 @@ index d87510521..9088bc5e7 100644
      }
    }
  
-@@ -617,12 +640,13 @@ export async function executeStreamedToolCalls(
-               );
-             } catch {}
-           } catch (error) {
+@@ -503,16 +538,23 @@ export async function executeStreamedToolCalls(
+   preprocessedCalls: PreprocessedToolCall[],
+   callbacks?: StreamCallbacks,
+   isHeadless?: boolean,
++  toolMode: ToolMode = "text",
+ ): Promise<{
+   hasRejection: boolean;
+   chatHistoryEntries: ToolResultWithStatus[];
+ }> {
+-  // Strategy: queue permissions (preserve order), then run approved tools in parallel.
+-  // If any permission is rejected, cancel the remaining tools in this batch.
++  // Strategy: queue permissions (preserve order). Read-only batches may run
++  // in parallel; if the batch contains any write/edit call, every call runs
++  // sequentially so edits cannot race each other.
+   //
+   // NOTE: parallelToolCallCount is passed to each tool so they can divide their
+   // output limits accordingly to avoid context overflow. Bash/Read do this for now
+-  const parallelToolCallCount = preprocessedCalls.length;
++  const canRunInParallel = preprocessedCalls.every(
++    (call) => call.tool.readonly === true,
++  );
++  const parallelToolCallCount = canRunInParallel
++    ? preprocessedCalls.length
++    : 1;
+ 
+   type IndexedCall = { index: number; call: PreprocessedToolCall };
+   const indexedCalls: IndexedCall[] = preprocessedCalls.map((call, index) => ({
+@@ -588,60 +630,68 @@ export async function executeStreamedToolCalls(
+         services.chatHistory.updateToolStatus(call.id, "calling");
+       } catch {}
+ 
+-      // Start execution immediately for approved calls
+-      execPromises.push(
+-        (async () => {
++      const runCall = async () => {
++        try {
++          logger.debug("Executing tool", {
++            name: call.name,
++            arguments: call.arguments,
++          });
++
++          const toolResult = await executeToolCall(call, {
++            parallelToolCallCount,
++          });
++          const entry: ToolResultWithStatus = {
++            role: "tool",
++            tool_call_id: call.id,
++            content: toolResult,
++            status: "done",
++          };
++          entriesByIndex.set(index, entry);
++          callbacks?.onToolResult?.(toolResult, call.name, "done");
++          // Immediate service update for UI feedback
+           try {
+-            logger.debug("Executing tool", {
+-              name: call.name,
+-              arguments: call.arguments,
+-            });
+-
+-            const toolResult = await executeToolCall(call, {
+-              parallelToolCallCount,
+-            });
+-            const entry: ToolResultWithStatus = {
+-              role: "tool",
+-              tool_call_id: call.id,
+-              content: toolResult,
+-              status: "done",
+-            };
+-            entriesByIndex.set(index, entry);
+-            callbacks?.onToolResult?.(toolResult, call.name, "done");
+-            // Immediate service update for UI feedback
+-            try {
+-              services.chatHistory.addToolResult(
+-                call.id,
+-                String(toolResult),
+-                "done",
+-              );
+-            } catch {}
+-          } catch (error) {
 -            const errorMessage = `Error executing tool ${call.name}: ${
-+            const rawError = `Error executing tool ${call.name}: ${
-               error instanceof Error ? error.message : String(error)
-             }`;
-+            const errorMessage = `${rawError}\n\n${buildToolUsageReminderForCliTool(call.tool)}`;
-             logger.error("Tool execution failed", {
-               name: call.name,
+-              error instanceof Error ? error.message : String(error)
+-            }`;
+-            logger.error("Tool execution failed", {
+-              name: call.name,
 -              error: errorMessage,
-+              error: rawError,
-             });
-             entriesByIndex.set(index, {
-               role: "tool",
+-            });
+-            entriesByIndex.set(index, {
+-              role: "tool",
+-              tool_call_id: call.id,
+-              content: errorMessage,
+-              status: "errored",
+-            });
+-            callbacks?.onToolError?.(errorMessage, call.name);
+-            // Immediate service update for UI feedback
+-            try {
+-              services.chatHistory.addToolResult(
+-                call.id,
+-                errorMessage as string,
+-                "errored",
+-              );
+-            } catch {}
+-          }
+-        })(),
+-      );
++            services.chatHistory.addToolResult(
++              call.id,
++              String(toolResult),
++              "done",
++            );
++          } catch {}
++        } catch (error) {
++          const rawError = `Error executing tool ${call.name}: ${
++            error instanceof Error ? error.message : String(error)
++          }`;
++          const errorMessage = `${rawError}\n\n${buildToolUsageReminderForCliTool(
++            call.tool,
++            toolMode,
++          )}`;
++          logger.error("Tool execution failed", {
++            name: call.name,
++            error: rawError,
++          });
++          entriesByIndex.set(index, {
++            role: "tool",
++            tool_call_id: call.id,
++            content: errorMessage,
++            status: "errored",
++          });
++          callbacks?.onToolError?.(errorMessage, call.name);
++          // Immediate service update for UI feedback
++          try {
++            services.chatHistory.addToolResult(
++              call.id,
++              errorMessage as string,
++              "errored",
++            );
++          } catch {}
++        }
++      };
++
++      if (canRunInParallel) {
++        execPromises.push(runCall());
++      } else {
++        // Write/edit/change-directory tools preserve the model's order.
++        await runCall();
++      }
+     } catch (error) {
+       const errorMessage = `Error checking permissions for ${call.name}: ${
+         error instanceof Error ? error.message : String(error)
 diff --git a/extensions/cli/src/stream/streamChatResponse.ts b/extensions/cli/src/stream/streamChatResponse.ts
-index 7afb41a5f..658ff1abf 100644
+index 7afb41a5f..c69dd6a04 100644
 --- a/extensions/cli/src/stream/streamChatResponse.ts
 +++ b/extensions/cli/src/stream/streamChatResponse.ts
-@@ -214,6 +214,7 @@ export async function processStreamingResponse(
+@@ -34,12 +34,15 @@ import type { ResilientStreamResult } from "./streamResilience.js";
+ 
+ dotenv.config();
+ 
+-const DEFAULT_MAX_AGENT_TURNS = 25;
++// Agentic coding sessions routinely need more than 25 tool calls (inspect,
++// grep, read, patch, test). Keep a bounded safety limit, but high enough that
++// normal work is not interrupted. Override with CONTINUE_MAX_AGENT_TURNS.
++const DEFAULT_MAX_AGENT_TURNS = 100;
+ 
+ function getMaxAgentTurns(): number {
+   const configured = Number(process.env.CONTINUE_MAX_AGENT_TURNS);
+-  if (Number.isInteger(configured) && configured > 0) {
+-    return configured;
++  if (Number.isInteger(configured) && configured >= 0) {
++    return configured === 0 ? Number.POSITIVE_INFINITY : configured;
+   }
+   return DEFAULT_MAX_AGENT_TURNS;
+ }
+@@ -214,6 +217,7 @@ export async function processStreamingResponse(
    const openaiChatHistory = convertFromUnifiedHistoryWithSystemMessage(
      chatHistory,
      systemMessage,
@@ -1368,6 +2146,63 @@ index 7afb41a5f..658ff1abf 100644
    ) as ChatCompletionMessageParam[];
    const requestStartTime = Date.now();
  
+@@ -313,6 +317,10 @@ export async function processStreamingResponse(
+           names: nudgeParsed.toolCalls.map((tc) => tc.name),
+         });
+         validToolCalls = nudgeParsed.toolCalls;
++      } else if (nudgeResult.toolCalls.length > 0) {
++        // Be tolerant of a provider that ignored the text protocol and
++        // returned native tool_calls anyway.
++        validToolCalls = nudgeResult.toolCalls;
+       }
+     }
+   }
+@@ -351,7 +359,8 @@ export async function streamChatResponse(
+   let finalResponse = "";
+   let compactionOccurredThisTurn = false; // Track if compaction happened during this conversation turn
+   let agentTurnCount = 0;
+-  const repeatedToolCalls = new Map<string, number>();
++  let lastToolSignature: string | undefined;
++  let consecutiveRepeatedCalls = 0;
+   const maxAgentTurns = getMaxAgentTurns();
+ 
+   while (true) {
+@@ -423,7 +432,7 @@ export async function streamChatResponse(
+       if (agentTurnCount > maxAgentTurns) {
+         const limitMessage =
+           `Stopped after ${maxAgentTurns} agent tool turns. ` +
+-          `Break the remaining work into smaller steps and continue.`;
++          `Send "continue" to resume, or break the remaining work into smaller steps.`;
+         logger.warn(limitMessage);
+         callbacks?.onSystemMessage?.(limitMessage);
+         if (services.chatHistory?.isReady()) {
+@@ -433,11 +442,14 @@ export async function streamChatResponse(
+       }
+ 
+       const signature = stableToolCallSignature(toolCalls);
+-      const repeatedCount = (repeatedToolCalls.get(signature) ?? 0) + 1;
+-      repeatedToolCalls.set(signature, repeatedCount);
+-      if (repeatedCount >= 3) {
++      consecutiveRepeatedCalls =
++        signature === lastToolSignature ? consecutiveRepeatedCalls + 1 : 1;
++      lastToolSignature = signature;
++      // Only consecutive repeats count: reading the same file again after an
++      // edit is legitimate and must not be mistaken for a loop.
++      if (consecutiveRepeatedCalls >= 5) {
+         const repeatedMessage =
+-          `Stopped because the same tool call was repeated 3 times without a new result: ` +
++          `Stopped because the same tool call was repeated 5 times in a row: ` +
+           `${toolCalls.map((call) => call.name).join(", ")}.`;
+         logger.warn(repeatedMessage);
+         callbacks?.onSystemMessage?.(repeatedMessage);
+@@ -473,6 +485,7 @@ export async function streamChatResponse(
+       callbacks,
+       isHeadless,
+       usage,
++      toolMode,
+     });
+ 
+     if (shouldReturn) {
 diff --git a/extensions/cli/src/stream/streamResilience.ts b/extensions/cli/src/stream/streamResilience.ts
 index dc241e6cb..e98f521c5 100644
 --- a/extensions/cli/src/stream/streamResilience.ts
@@ -1436,21 +2271,104 @@ index dc241e6cb..e98f521c5 100644
          abortController.signal,
        );
        connectionPhase = false;
+diff --git a/extensions/cli/src/systemMessage.test.ts b/extensions/cli/src/systemMessage.test.ts
+index 1ebab348b..bd63388f3 100644
+--- a/extensions/cli/src/systemMessage.test.ts
++++ b/extensions/cli/src/systemMessage.test.ts
+@@ -63,6 +63,18 @@ describe("constructSystemMessage", () => {
+     expect(result).toContain("<env>");
+   });
+ 
++  it("rebuilds the environment section after a directory change", async () => {
++    const cwdSpy = vi
++      .spyOn(process, "cwd")
++      .mockReturnValue("/tmp/continue-cwd-after-cd");
++    try {
++      const result = await constructSystemMessage("normal");
++      expect(result).toContain("Working directory: /tmp/continue-cwd-after-cd");
++    } finally {
++      cwdSpy.mockRestore();
++    }
++  });
++
+   it("should include platform information", async () => {
+     const result = await constructSystemMessage("normal");
+ 
 diff --git a/extensions/cli/src/systemMessage.ts b/extensions/cli/src/systemMessage.ts
-index 1cc93f6de..96ce2d1d0 100644
+index 1cc93f6de..7f6c18c8b 100644
 --- a/extensions/cli/src/systemMessage.ts
 +++ b/extensions/cli/src/systemMessage.ts
-@@ -52,6 +52,10 @@ Notes:
- 3. When an available tool is the correct next action, execute it immediately. Do not announce that you are going to read, search, analyze, inspect, edit, or run a tool before issuing the call.
- 4. Do not narrate planned tool actions or repeat them in prose. Use text for clarification, concise results, or the final answer.
- 5. Do not repeat the same tool call with the same arguments when it produces no new information.
-+6. To change the persistent working directory, use the ChangeDirectory tool. A \`cd\` inside Bash only affects that single command.
-+7. To modify existing files, use ApplyPatch by default (it applies one atomic patch to one or more files). Use Edit/MultiEdit for a small exact replacement and Write only for a new file or a complete rewrite. Never use Bash, sed, awk, cat, echo, tee or Python to modify project files.
-+8. Tool arguments must include every required parameter. If a tool call is rejected for invalid or missing arguments, read the schema in the error, fix the arguments, and call it again. Never repeat the same invalid call.
-+9. When you need a clarification, a preference or a decision from the user, call AskQuestion instead of writing a question in prose and ending the turn. AskQuestion is the only way to get an interactive answer; keep it concise and provide options (empty options means free-form).
+@@ -44,14 +44,47 @@ function getGitStatus(): string {
+   }
+ }
+ 
+-const baseSystemMessage = `You are an agent in the Continue CLI. Given the user's prompt, you should use the tools available to you to answer the user's question.
++/**
++ * Built on every request so /cd and ChangeDirectory immediately update the
++ * working directory and git status shown to the model.
++ */
++function getBaseSystemMessage(mode: PermissionMode): string {
++  const canEdit = mode !== "plan";
++  const notes = [
++    "1. IMPORTANT: You should be concise, direct, and to the point, since your responses will be displayed on a command line interface.",
++    "2. When relevant, share file names and code snippets relevant to the query",
++    "3. When an available tool is the correct next action, execute it immediately. Do not announce that you are going to read, search, analyze, inspect, edit, or run a tool before issuing the call.",
++    "4. Do not narrate planned tool actions or repeat them in prose. Use text for clarification, concise results, or the final answer.",
++    "5. Do not repeat the same tool call with the same arguments when it produces no new information.",
++    "6. To change the persistent working directory, use the ChangeDirectory tool. A \`cd\` inside Bash only affects that single command.",
++    ...(canEdit
++      ? [
++          "7. To modify existing files, use ApplyPatch by default (it applies one atomic patch to one or more files). Use Edit or MultiEdit (whichever is available) for a small exact replacement and Write only for a new file or a complete rewrite. Never use Bash, sed, awk, cat, echo, tee or Python to modify project files.",
++        ]
++      : []),
++    "8. Tool arguments must include every required parameter. If a tool call is rejected for invalid or missing arguments, read the schema in the error, fix the arguments, and call it again. Never repeat the same invalid call.",
++    "9. When you need a clarification, a preference or a decision from the user, call AskQuestion instead of writing a question in prose and ending the turn. AskQuestion is the only way to get an interactive answer; keep it concise and provide options (empty options means free-form).",
++    "10. Choose the most specific tool for the job:",
++    "   - Read a known file with Read. Use ReadRange for a large file or a known line range, and ReadManyFiles for several files.",
++    "   - Find text with Search. Find files by path/name with Glob. Inspect a directory with List. Use GetReferences, GetDefinition or SearchWorkspaceSymbols for symbol navigation when available.",
++    ...(canEdit
++      ? [
++          "   - Modify existing files with ApplyPatch by default; use Edit for one exact replacement and MultiEdit (when available) for several exact replacements in one file. Use Write only for a new file or a complete rewrite.",
++          "   - Use Bash for builds, tests, git and package managers, not for reading or editing project files.",
++          "   - If you have not read the file or range you are about to edit, read it first.",
++        ]
++      : [
++          "   - Plan mode is read-only: inspect with Read, ReadRange, ReadManyFiles, Search, Glob and List. Never call ApplyPatch, Edit, MultiEdit, Write or any other tool that changes project files.",
++          "   - Bash is allowed only for read-only commands in plan mode; never use it to create, modify or delete project files.",
++        ]),
++    "   - Use ChangeDirectory to change the persistent working directory, not \`cd\` inside Bash.",
++    "   - Independent read-only calls may run concurrently; write/edit calls run one at a time.",
++  ];
++
++  return `You are an agent in the Continue CLI. Given the user's prompt, you should use the tools available to you to answer the user's question.
+ 
+ Notes:
+-1. IMPORTANT: You should be concise, direct, and to the point, since your responses will be displayed on a command line interface.
+-2. When relevant, share file names and code snippets relevant to the query
+-3. When an available tool is the correct next action, execute it immediately. Do not announce that you are going to read, search, analyze, inspect, edit, or run a tool before issuing the call.
+-4. Do not narrate planned tool actions or repeat them in prose. Use text for clarification, concise results, or the final answer.
+-5. Do not repeat the same tool call with the same arguments when it produces no new information.
++${notes.join("\n")}
  Here is useful information about the environment you are running in:
  <env>
  Working directory: ${process.cwd()}
+@@ -66,6 +99,7 @@ As you answer the user's questions, you can use the following context:
+ 
+ ${getGitStatus()}
+ </context>`;
++}
+ 
+ async function getConfigYamlRules(): Promise<string[]> {
+   const configState = await serviceContainer.get<ConfigServiceState>(
+@@ -223,7 +257,7 @@ export async function constructSystemMessage(
+   }
+ 
+   // Construct the comprehensive system message
+-  let systemMessage = baseSystemMessage;
++  let systemMessage = getBaseSystemMessage(mode);
+ 
+   // Chat mode is a plain conversation without tools
+   if (mode === "chat") {
 diff --git a/extensions/cli/src/tools/allBuiltIns.ts b/extensions/cli/src/tools/allBuiltIns.ts
 index dcd687b14..16037ea41 100644
 --- a/extensions/cli/src/tools/allBuiltIns.ts
@@ -1472,7 +2390,7 @@ index dcd687b14..16037ea41 100644
    getDefinitionTool,
    searchWorkspaceSymbolsTool,
 diff --git a/extensions/cli/src/tools/applyPatch.ts b/extensions/cli/src/tools/applyPatch.ts
-index 91797ff61..24226617b 100644
+index 91797ff61..87cf84547 100644
 --- a/extensions/cli/src/tools/applyPatch.ts
 +++ b/extensions/cli/src/tools/applyPatch.ts
 @@ -42,9 +42,7 @@ function parseUnifiedPatch(patch: string): PatchFile[] {
@@ -1506,7 +2424,34 @@ index 91797ff61..24226617b 100644
    parameters: {
      type: "object",
      required: ["patch"],
-@@ -178,10 +174,7 @@ export const applyPatchTool: Tool = {
+@@ -157,6 +153,26 @@ export const applyPatchTool: Tool = {
+     ],
+   }),
+   run: async (args: { patch: string; dryRun?: boolean }) => {
++    // The tool description promises existing-file updates only. Reject Add,
++    // Delete and Move sections instead of ignoring them and reporting success.
++    if (
++      /^\*\*\* Add File:/m.test(args.patch) ||
++      /^--- \/dev\/null$/m.test(args.patch)
++    ) {
++      throw new Error(
++        "ApplyPatch cannot create files. Use Write for a new file.",
++      );
++    }
++    if (
++      /^\*\*\* Delete File:/m.test(args.patch) ||
++      /^\+\+\+ \/dev\/null$/m.test(args.patch)
++    ) {
++      throw new Error("ApplyPatch cannot delete files.");
++    }
++    if (/^\*\*\* Move to:/m.test(args.patch)) {
++      throw new Error("ApplyPatch cannot move files.");
++    }
++
+     let files = parseBeginPatch(args.patch);
+     if (files.length === 0) {
+       files = parseUnifiedPatch(args.patch);
+@@ -178,10 +194,7 @@ export const applyPatchTool: Tool = {
        const oldContent = fs.readFileSync(resolved, "utf8");
        let newContent: string;
        if (file.unified) {
@@ -1600,8 +2545,46 @@ index d0b265f22..21850e5c2 100644
  
      // Setup utility mocks with proper return values
      vi.mocked(calculateLinesOfCodeDiff).mockReturnValue({
+diff --git a/extensions/cli/src/tools/edit.ts b/extensions/cli/src/tools/edit.ts
+index 99e3087bf..05e9adeee 100644
+--- a/extensions/cli/src/tools/edit.ts
++++ b/extensions/cli/src/tools/edit.ts
+@@ -14,6 +14,7 @@ import {
+ 
+ import { EditOperation } from "./multiEdit.js";
+ import {
++  hasReadFileOrRange,
+   isTextVisibleForEdit,
+   readFilesSet,
+   readFileTool,
+@@ -112,6 +113,12 @@ WARNINGS:
+ 
+     const { resolvedPath } = validateAndResolveFilePath(args);
+     if (!isTextVisibleForEdit(resolvedPath, old_string)) {
++      if (hasReadFileOrRange(resolvedPath)) {
++        throw new ContinueError(
++          ContinueErrorReason.FindAndReplaceOldStringNotFound,
++          `The exact text to replace is not present in the current contents of ${args.file_path}. Read the file again and use the current text.`,
++        );
++      }
+       throw new ContinueError(
+         ContinueErrorReason.EditToolFileNotRead,
+         `The exact text to replace has not been read. Use Read or ReadRange to read the containing lines before editing ${args.file_path}.`,
+diff --git a/extensions/cli/src/tools/globFiles.ts b/extensions/cli/src/tools/globFiles.ts
+index 90db4b577..7b9d63e41 100644
+--- a/extensions/cli/src/tools/globFiles.ts
++++ b/extensions/cli/src/tools/globFiles.ts
+@@ -7,7 +7,7 @@ export const globFilesTool: Tool = {
+   name: "Glob",
+   displayName: "Glob",
+   description:
+-    "Find files recursively using a glob pattern without depending on ripgrep.",
++    "Find file paths recursively using a glob pattern. Use Search to find text inside files; use List to inspect one directory.",
+   parameters: {
+     type: "object",
+     required: ["pattern"],
 diff --git a/extensions/cli/src/tools/index.tsx b/extensions/cli/src/tools/index.tsx
-index 615cde07a..8a56a2fb0 100644
+index 615cde07a..ef07fea16 100644
 --- a/extensions/cli/src/tools/index.tsx
 +++ b/extensions/cli/src/tools/index.tsx
 @@ -24,6 +24,7 @@ import { editTool } from "./edit.js";
@@ -1612,6 +2595,15 @@ index 615cde07a..8a56a2fb0 100644
  import {
    getDefinitionTool,
    getReferencesTool,
+@@ -44,7 +45,7 @@ import { readFileRangeTool } from "./readFileRange.js";
+ import { readManyFilesTool } from "./readManyFiles.js";
+ import { reportFailureTool } from "./reportFailure.js";
+ import { runTerminalCommandTool } from "./runTerminalCommand.js";
+-import { checkIfRipgrepIsInstalled, searchCodeTool } from "./searchCode.js";
++import { searchCodeTool } from "./searchCode.js";
+ import { skillsTool } from "./skills.js";
+ import { subagentTool } from "./subagent.js";
+ import {
 @@ -87,6 +88,7 @@ const BASE_BUILTIN_TOOLS: Tool[] = [
    runTerminalCommandTool,
    fetchTool,
@@ -1620,6 +2612,37 @@ index 615cde07a..8a56a2fb0 100644
    getReferencesTool,
    getDefinitionTool,
    searchWorkspaceSymbolsTool,
+@@ -111,12 +113,10 @@ const BUILTIN_SEARCH_TOOLS: Tool[] = [searchCodeTool];
+ export async function getAllAvailableTools(
+   isHeadless: boolean,
+ ): Promise<Tool[]> {
+-  const tools = [...BASE_BUILTIN_TOOLS];
+-
+-  const isRipgrepInstalled = await checkIfRipgrepIsInstalled();
+-  if (isRipgrepInstalled) {
+-    tools.push(...BUILTIN_SEARCH_TOOLS);
+-  }
++  // Search always exists: searchCodeTool uses ripgrep when available and a
++  // native grep/findstr fallback otherwise. Gating it on ripgrep made the
++  // Search tool silently disappear on machines without ripgrep.
++  const tools = [...BASE_BUILTIN_TOOLS, ...BUILTIN_SEARCH_TOOLS];
+ 
+   // Add agent-specific tools if agent ID is present
+   // (these require --id to function and will confuse the agent if unavailable)
+diff --git a/extensions/cli/src/tools/listFiles.ts b/extensions/cli/src/tools/listFiles.ts
+index 91fe39f6b..2d39e3771 100644
+--- a/extensions/cli/src/tools/listFiles.ts
++++ b/extensions/cli/src/tools/listFiles.ts
+@@ -9,7 +9,8 @@ import { Tool } from "./types.js";
+ export const listFilesTool: Tool = {
+   name: "List",
+   displayName: "List",
+-  description: "List files in a directory",
++  description:
++    "List files and folders in a directory. Use Glob to find paths by pattern; use List to inspect one directory.",
+   parameters: {
+     type: "object",
+     required: ["dirpath"],
 diff --git a/extensions/cli/src/tools/multiEdit.test.ts b/extensions/cli/src/tools/multiEdit.test.ts
 index 1f6d9cfde..ae36a8591 100644
 --- a/extensions/cli/src/tools/multiEdit.test.ts
@@ -1632,40 +2655,193 @@ index 1f6d9cfde..ae36a8591 100644
  
      // Setup utility mocks with proper return values
      vi.mocked(calculateLinesOfCodeDiff).mockReturnValue({
+diff --git a/extensions/cli/src/tools/multiEdit.ts b/extensions/cli/src/tools/multiEdit.ts
+index d26b44404..0e61ceea9 100644
+--- a/extensions/cli/src/tools/multiEdit.ts
++++ b/extensions/cli/src/tools/multiEdit.ts
+@@ -12,6 +12,7 @@ import {
+ 
+ import { editTool, validateAndResolveFilePath } from "./edit.js";
+ import {
++  hasReadFileOrRange,
+   isTextVisibleForEdit,
+   readFileTool,
+ } from "./readFile.js";
+@@ -111,6 +112,12 @@ WARNINGS:
+     const { edits } = validateMultiEdit(args);
+     for (const edit of edits as EditOperation[]) {
+       if (!isTextVisibleForEdit(resolvedPath, edit.old_string)) {
++        if (hasReadFileOrRange(resolvedPath)) {
++          throw new ContinueError(
++            ContinueErrorReason.FindAndReplaceOldStringNotFound,
++            `An old_string in this edit is not present in the current contents of ${args.file_path}. Read the file again and use the current text.`,
++          );
++        }
+         throw new ContinueError(
+           ContinueErrorReason.EditToolFileNotRead,
+           `An old_string in this edit has not been read. Use Read or ReadRange to read the containing lines before editing ${args.file_path}.`,
+diff --git a/extensions/cli/src/tools/readFile.test.ts b/extensions/cli/src/tools/readFile.test.ts
+new file mode 100644
+index 000000000..e25a6f58e
+--- /dev/null
++++ b/extensions/cli/src/tools/readFile.test.ts
+@@ -0,0 +1,67 @@
++import * as fs from "fs";
++import * as os from "os";
++import path from "path";
++
++import { afterEach, describe, expect, it } from "vitest";
++
++import {
++  isTextVisibleForEdit,
++  markFileAsRead,
++  markFileRangeAsRead,
++  readFilesSet,
++  readFileRanges,
++} from "./readFile.js";
++
++const tempFiles: string[] = [];
++
++function makeFile(content: string): string {
++  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "cn-read-"));
++  const file = path.join(dir, "file.txt");
++  fs.writeFileSync(file, content, "utf8");
++  tempFiles.push(dir);
++  return file;
++}
++
++afterEach(() => {
++  readFilesSet.clear();
++  readFileRanges.clear();
++  for (const dir of tempFiles.splice(0)) {
++    fs.rmSync(dir, { recursive: true, force: true });
++  }
++});
++
++describe("isTextVisibleForEdit", () => {
++  it("requires the file to have been read first", () => {
++    const file = makeFile("alpha\nbeta");
++    expect(isTextVisibleForEdit(file, "alpha")).toBe(false);
++
++    markFileAsRead(file);
++    expect(isTextVisibleForEdit(file, "alpha")).toBe(true);
++  });
++
++  it("accepts text covered by a read range only", () => {
++    const file = makeFile("alpha\nbeta");
++    markFileRangeAsRead(file, 1, 1, "alpha");
++
++    expect(isTextVisibleForEdit(file, "alpha")).toBe(true);
++    expect(isTextVisibleForEdit(file, "beta")).toBe(false);
++  });
++
++  it("rejects stale text after the file changed", () => {
++    const file = makeFile("alpha\nbeta");
++    markFileAsRead(file);
++
++    fs.writeFileSync(file, "gamma\ndelta", "utf8");
++
++    expect(isTextVisibleForEdit(file, "alpha")).toBe(false);
++    expect(isTextVisibleForEdit(file, "gamma")).toBe(true);
++  });
++
++  it("returns false when the file disappeared", () => {
++    const file = makeFile("alpha");
++    markFileAsRead(file);
++    fs.rmSync(file);
++
++    expect(isTextVisibleForEdit(file, "alpha")).toBe(false);
++  });
++});
 diff --git a/extensions/cli/src/tools/readFile.ts b/extensions/cli/src/tools/readFile.ts
-index 8400c7a74..b33a56458 100644
+index 8400c7a74..910b3464c 100644
 --- a/extensions/cli/src/tools/readFile.ts
 +++ b/extensions/cli/src/tools/readFile.ts
-@@ -52,17 +52,20 @@ export function isTextVisibleForEdit(
+@@ -37,6 +37,13 @@ export function markFileAsRead(filePath: string) {
+   readFilesSet.add(filePath);
+ }
+ 
++export function hasReadFileOrRange(filePath: string): boolean {
++  return (
++    readFilesSet.has(filePath) ||
++    (readFileRanges.get(filePath)?.length ?? 0) > 0
++  );
++}
++
+ export function markFileRangeAsRead(
+   filePath: string,
+   startLine: number,
+@@ -52,19 +59,25 @@ export function isTextVisibleForEdit(
    filePath: string,
    text: string,
  ): boolean {
 -  if (fs.existsSync(filePath) && fs.statSync(filePath).isFile()) {
--    if (!text) {
--      return true;
--    }
++  let currentContent: string;
++  try {
++    if (!fs.existsSync(filePath) || !fs.statSync(filePath).isFile()) {
++      return false;
++    }
+     if (!text) {
+       return true;
+     }
 -    const currentContent = fs.readFileSync(filePath, "utf-8");
 -    if (!currentContent.includes(text)) {
 -      return false;
 -    }
 -  } else {
-+  let isFile = false;
-+  try {
-+    isFile = fs.existsSync(filePath) && fs.statSync(filePath).isFile();
++    currentContent = fs.readFileSync(filePath, "utf8");
 +  } catch {
 +    // The file may have been deleted or replaced between existsSync and
-+    // statSync (common with editors and atomic saves).
-+    return false;
-+  }
-+  if (!isFile) {
++    // readFile/statSync (common with editors and atomic saves).
      return false;
    }
-+  if (!text) {
-+    return true;
-+  }
-   if (!text) {
-     return readFilesSet.has(filePath) || (readFileRanges.get(filePath)?.length ?? 0) > 0;
+-  if (!text) {
+-    return readFilesSet.has(filePath) || (readFileRanges.get(filePath)?.length ?? 0) > 0;
++
++  // The text being edited must still exist now. A whole-file or range read
++  // from an earlier version is not enough if the file changed since then.
++  if (!currentContent.includes(text)) {
++    return false;
    }
+   if (readFilesSet.has(filePath)) {
+     return true;
+@@ -77,7 +90,8 @@ export function isTextVisibleForEdit(
+ export const readFileTool: Tool = {
+   name: "Read",
+   displayName: "Read",
+-  description: "Read the contents of a file at the specified path",
++  description:
++    "Read the contents of a file at the specified path. Use ReadRange for a large file or a known line range, and ReadManyFiles for several files.",
+   parameters: {
+     type: "object",
+     required: ["filepath"],
+@@ -145,7 +159,7 @@ export const readFileTool: Tool = {
+           ContinueErrorReason.FileTooLarge,
+           `File is too large to read: ${filepath} (${charCount.toLocaleString()} characters, ${lineCount.toLocaleString()} lines). ` +
+             `Maximum allowed: ${maxChars.toLocaleString()} characters or ${maxLines.toLocaleString()} lines.${parallelNote} ` +
+-            `Consider using terminal commands like 'head', 'tail', 'sed', or 'grep' to read targeted parts of the file.`,
++            `Use ReadRange with startLine/endLine, or Search to locate the relevant section, instead of reading the whole file.`,
+         );
+       }
+ 
+diff --git a/extensions/cli/src/tools/readFileRange.ts b/extensions/cli/src/tools/readFileRange.ts
+index a1b72fbb7..9b0c4759e 100644
+--- a/extensions/cli/src/tools/readFileRange.ts
++++ b/extensions/cli/src/tools/readFileRange.ts
+@@ -39,11 +39,11 @@ export const readFileRangeTool: Tool = {
+         description: "Absolute or relative path to the file",
+       },
+       startLine: {
+-        type: "number",
++        type: "integer",
+         description: "First line to read, 1-based",
+       },
+       endLine: {
+-        type: "number",
++        type: "integer",
+         description: "Last line to read, 1-based",
+       },
+     },
 diff --git a/extensions/cli/src/tools/runTerminalCommand.ts b/extensions/cli/src/tools/runTerminalCommand.ts
 index 6b640c6a1..617d6e5f5 100644
 --- a/extensions/cli/src/tools/runTerminalCommand.ts
@@ -1682,7 +2858,7 @@ index 6b640c6a1..617d6e5f5 100644
    parameters: {
      type: "object",
 diff --git a/extensions/cli/src/tools/searchCode.test.ts b/extensions/cli/src/tools/searchCode.test.ts
-index 81558d83c..076a56366 100644
+index 81558d83c..0ed29d585 100644
 --- a/extensions/cli/src/tools/searchCode.test.ts
 +++ b/extensions/cli/src/tools/searchCode.test.ts
 @@ -11,7 +11,7 @@ const execMock: any = vi.fn();
@@ -1694,11 +2870,36 @@ index 81558d83c..076a56366 100644
  
  // Since we want to test just the interface and not the internals,
  // let's create a simplified version of the run function to test the truncation logic
+@@ -73,7 +73,7 @@ describe("searchCodeTool", () => {
+       vi.resetModules();
+     });
+ 
+-    it("filters out lines longer than 1000 characters", async () => {
++    it("truncates lines longer than 1000 characters instead of dropping matches", async () => {
+       const childProc = await import("child_process");
+       const long = "a".repeat(1001);
+ 
+@@ -89,6 +89,7 @@ describe("searchCodeTool", () => {
+ 
+       expect(result).toContain("path/file.ts:2:match");
+       expect(result).not.toContain(long);
++      expect(result).toContain("[line truncated]");
+       expect(result).not.toContain("[Results truncated:");
+     });
+   });
 diff --git a/extensions/cli/src/tools/searchCode.ts b/extensions/cli/src/tools/searchCode.ts
-index 1b940a2b9..bee5dd508 100644
+index 1b940a2b9..4588fd0a2 100644
 --- a/extensions/cli/src/tools/searchCode.ts
 +++ b/extensions/cli/src/tools/searchCode.ts
-@@ -57,17 +57,15 @@ async function searchWithRipgrep(
+@@ -5,7 +5,6 @@ import * as util from "util";
+ 
+ import { ContinueError, ContinueErrorReason } from "core/util/errors.js";
+ import { findUp } from "find-up";
+-import { minimatch } from "minimatch";
+ 
+ import { parseEnvNumber } from "../util/truncateOutput.js";
+ 
+@@ -57,17 +56,16 @@ async function searchWithRipgrep(
    filePattern?: string,
    options?: SearchOptions,
  ) {
@@ -1708,8 +2909,10 @@ index 1b940a2b9..bee5dd508 100644
 -    "--color",
 -    "never",
 -  ];
+-  args.push(pattern);
 +  const args = ["--line-number", "--with-filename", "--color", "never"];
-   args.push(pattern);
++  // -e keeps patterns that start with "-" from being parsed as flags.
++  args.push("-e", pattern);
    if (filePattern) {
      args.push("-g", filePattern);
    }
@@ -1721,10 +2924,31 @@ index 1b940a2b9..bee5dd508 100644
      args.push("-i");
    }
    if (options?.fixedStrings) {
-@@ -105,14 +103,11 @@ async function searchWithGrepOrFindstr(
+@@ -90,7 +88,7 @@ async function searchWithRipgrep(
+   for (const ignorePattern of ignorePatterns) {
+     args.push("-g", `!${ignorePattern}`);
+   }
+-  args.push(searchPath);
++  args.push("--", searchPath);
+   const { stdout, stderr } = await execFilePromise("rg", args);
+   return { stdout, stderr };
+ }
+@@ -100,177 +98,56 @@ async function searchWithGrepOrFindstr(
+   pattern: string,
+   searchPath: string,
+   filePattern?: string,
++  options?: SearchOptions,
+ ) {
+   const isWindows = process.platform === "win32";
    const ignorePatterns = await getGitignorePatterns();
++  // grep/findstr need a directory as cwd. When the user targets a single
++  // file, run from its parent and pass its basename as the target.
++  const resolvedPath = path.resolve(searchPath);
++  const isDirectory = fs.statSync(resolvedPath).isDirectory();
++  const cwd = isDirectory ? resolvedPath : path.dirname(resolvedPath);
++  const target = isDirectory ? "." : path.basename(resolvedPath);
    if (isWindows) {
-     const fileSpec = filePattern ? filePattern : "*";
+-    const fileSpec = filePattern ? filePattern : "*";
 -    const { stdout, stderr } = await execFilePromise("findstr", [
 -      "/S",
 -      "/N",
@@ -1733,72 +2957,207 @@ index 1b940a2b9..bee5dd508 100644
 -      pattern,
 -      fileSpec,
 -    ], { cwd: searchPath });
-+    const { stdout, stderr } = await execFilePromise(
-+      "findstr",
-+      ["/S", "/N", "/P", "/R", pattern, fileSpec],
-+      { cwd: searchPath },
-+    );
++    const fileSpec = filePattern ? filePattern : isDirectory ? "*" : target;
++    const args = ["/S", "/N", "/P"];
++    // Match ripgrep's default: case-insensitive unless requested otherwise.
++    if (options?.caseSensitive !== true) {
++      args.push("/I");
++    }
++    args.push(options?.fixedStrings ? "/L" : "/R", pattern, fileSpec);
++    const { stdout, stderr } = await execFilePromise("findstr", args, { cwd });
      return { stdout, stderr };
    } else {
-     const args = ["-R", "-n", "-H", "-I"];
-@@ -122,15 +117,22 @@ async function searchWithGrepOrFindstr(
- 
-     function matchesGlobPattern(relPath: string, pattern: string): boolean {
-       try {
+-    const args = ["-R", "-n", "-H", "-I"];
+-    for (const ignorePattern of ignorePatterns) {
+-      args.push(`--exclude=${ignorePattern}`, `--exclude-dir=${ignorePattern}`);
++    // -r (not -R) skips symlinked directories, avoiding symlink loops that
++    // can make grep appear to hang in large repositories.
++    const args = ["-r", "-n", "-H", "-I"];
++    if (options?.caseSensitive !== true) {
++      args.push("-i");
+     }
+-
+-    function matchesGlobPattern(relPath: string, pattern: string): boolean {
+-      try {
 -        return minimatch(relPath.replace(/\\/g, "/"), pattern.replace(/^\.\//, ""), {
 -          dot: true,
 -        });
-+        return minimatch(
-+          relPath.replace(/\\/g, "/"),
-+          pattern.replace(/^\.\//, ""),
-+          {
-+            dot: true,
-+          },
-+        );
-       } catch {
-         return relPath.includes(pattern);
-       }
+-      } catch {
+-        return relPath.includes(pattern);
+-      }
++    if (options?.fixedStrings) {
++      args.push("-F");
      }
- 
+-
 -    function isExcludedPath(relPath: string, exclusions: string[] = []): boolean {
-+    function isExcludedPath(
-+      relPath: string,
-+      exclusions: string[] = [],
-+    ): boolean {
-       const normalized = relPath.replace(/\\/g, "/");
-       const defaults = [
-         ".git/",
-@@ -202,16 +204,15 @@ async function searchWithGrepOrFindstr(
-         for (const entry of entries) {
-           if (totalMatches >= totalLimit) break;
-           const abs = path.join(dir, entry.name);
+-      const normalized = relPath.replace(/\\/g, "/");
+-      const defaults = [
+-        ".git/",
+-        ".continue/",
+-        "node_modules/",
+-        "bin/",
+-        "obj/",
+-        "dist/",
+-        "build/",
+-        ".vs/",
+-      ];
+-      if (
+-        defaults.some(
+-          (entry) =>
+-            normalized.startsWith(entry) || normalized.includes(`/${entry}`),
+-        )
+-      ) {
+-        return true;
+-      }
+-      return exclusions.some((pattern) =>
+-        matchesGlobPattern(normalized, pattern),
++    if (options?.contextBefore || options?.contextAfter) {
++      args.push(
++        "-B",
++        String(options.contextBefore ?? 0),
++        "-A",
++        String(options.contextAfter ?? 0),
+       );
+     }
+-
+-    async function searchWithNode(
+-      pattern: string,
+-      searchPath: string,
+-      options: SearchOptions,
+-    ): Promise<{ stdout: string; stderr: string }> {
+-      let regex: RegExp;
+-      try {
+-        const source = options.fixedStrings
+-          ? pattern.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")
+-          : pattern;
+-        const flags = options.caseSensitive ? "g" : "gi";
+-        regex = options.multiline
+-          ? new RegExp(source, `${flags}m`)
+-          : new RegExp(source, flags);
+-      } catch {
+-        return { stdout: "", stderr: "Invalid search pattern" };
+-      }
+-
+-      const totalLimit =
+-        Number.isInteger(options.totalMaxMatches) &&
+-        (options.totalMaxMatches ?? 0) > 0
+-          ? Math.min(options.totalMaxMatches ?? 100, 1000)
+-          : 100;
+-      const perFileLimit =
+-        Number.isInteger(options.maxMatchesPerFile) &&
+-        (options.maxMatchesPerFile ?? 0) > 0
+-          ? Math.min(options.maxMatchesPerFile ?? 20, 100)
+-          : 20;
+-      const contextBefore = Math.max(0, options.contextBefore ?? 0);
+-      const contextAfter = Math.max(0, options.contextAfter ?? 0);
+-      const outputMode = options.outputMode ?? "content";
+-      let totalMatches = 0;
+-      const sections: string[] = [];
+-      const countSections: string[] = [];
+-      const fileSections: string[] = [];
+-
+-      const walk = (dir: string, relBase: string) => {
+-        if (totalMatches >= totalLimit) return;
+-        let entries: fs.Dirent[];
+-        try {
+-          entries = fs.readdirSync(dir, { withFileTypes: true });
+-        } catch {
+-          return;
+-        }
+-        for (const entry of entries) {
+-          if (totalMatches >= totalLimit) break;
+-          const abs = path.join(dir, entry.name);
 -          const rel = relBase
 -            ? `${relBase}/${entry.name}`
 -            : entry.name;
-+          const rel = relBase ? `${relBase}/${entry.name}` : entry.name;
-           if (entry.isDirectory()) {
-             if (!isExcludedPath(`${rel}/`, options.exclude)) {
-               walk(abs, rel);
-             }
-           } else if (entry.isFile()) {
-             if (isExcludedPath(rel, options.exclude)) continue;
+-          if (entry.isDirectory()) {
+-            if (!isExcludedPath(`${rel}/`, options.exclude)) {
+-              walk(abs, rel);
+-            }
+-          } else if (entry.isFile()) {
+-            if (isExcludedPath(rel, options.exclude)) continue;
 -            if (options.glob && !matchesGlobPattern(rel, options.glob)) continue;
-+            if (options.glob && !matchesGlobPattern(rel, options.glob))
-+              continue;
-             let content: string;
-             try {
-               const stat = fs.statSync(abs);
-@@ -240,7 +241,8 @@ async function searchWithGrepOrFindstr(
-                   outputLines.push(`${n + 1}:${lines[n]}`);
-                 }
-               }
+-            let content: string;
+-            try {
+-              const stat = fs.statSync(abs);
+-              if (stat.size > 2 * 1024 * 1024) continue;
+-              content = fs.readFileSync(abs, "utf8");
+-              if (content.includes("\0")) continue;
+-            } catch {
+-              continue;
+-            }
+-            const lines = content.split(/\r?\n/);
+-            let fileMatches = 0;
+-            const printed = new Set<number>();
+-            const outputLines: string[] = [];
+-            for (let i = 0; i < lines.length; i++) {
+-              regex.lastIndex = 0;
+-              if (!regex.test(lines[i])) continue;
+-              fileMatches++;
+-              totalMatches++;
+-              for (
+-                let n = Math.max(0, i - contextBefore);
+-                n <= Math.min(lines.length - 1, i + contextAfter);
+-                n++
+-              ) {
+-                if (!printed.has(n)) {
+-                  printed.add(n);
+-                  outputLines.push(`${n + 1}:${lines[n]}`);
+-                }
+-              }
 -              if (fileMatches >= perFileLimit || totalMatches >= totalLimit) break;
-+              if (fileMatches >= perFileLimit || totalMatches >= totalLimit)
-+                break;
-             }
-             if (fileMatches > 0) {
-               fileSections.push(rel);
-@@ -319,8 +321,7 @@ export const searchCodeTool: Tool = {
+-            }
+-            if (fileMatches > 0) {
+-              fileSections.push(rel);
+-              countSections.push(`${rel}:${fileMatches}`);
+-              if (outputMode === "content") {
+-                sections.push(`./${rel}\n${outputLines.join("\n")}`);
+-              }
+-            }
+-          }
+-        }
+-      };
+-      walk(searchPath, "");
+-      if (outputMode === "files") {
+-        return { stdout: fileSections.join("\n"), stderr: "" };
+-      }
+-      if (outputMode === "count") {
+-        return { stdout: countSections.join("\n"), stderr: "" };
+-      }
+-      return {
+-        stdout: sections.join("\n--\n"),
+-        stderr: "",
+-      };
++    for (const exclude of options?.exclude ?? []) {
++      args.push(`--exclude=${exclude}`, `--exclude-dir=${exclude}`);
+     }
++    for (const ignorePattern of ignorePatterns) {
++      args.push(`--exclude=${ignorePattern}`, `--exclude-dir=${ignorePattern}`);
++    }
++
+     if (filePattern) {
+       args.push("--include", filePattern);
+     }
+-    args.push(pattern, ".");
+-    const { stdout, stderr } = await execFilePromise("grep", args, {
+-      cwd: searchPath,
+-    });
++    args.push("-e", pattern, "--", target);
++    const { stdout, stderr } = await execFilePromise("grep", args, { cwd });
+     return { stdout, stderr };
+   }
+ }
+@@ -296,7 +173,8 @@ function getSearchMaxResultChars(): number {
+ export const searchCodeTool: Tool = {
+   name: "Search",
+   displayName: "Search",
+-  description: "Search the codebase using ripgrep (rg) for a specific pattern",
++  description:
++    "Search file contents using a regex (ripgrep when available, native grep/findstr fallback; case-insensitive by default). Use fixedStrings for literal text, Glob to find file paths, and List to inspect a directory.",
+   parameters: {
+     type: "object",
+     required: ["pattern"],
+@@ -319,8 +197,7 @@ export const searchCodeTool: Tool = {
        },
        exclude: {
          type: "array",
@@ -1808,28 +3167,90 @@ index 1b940a2b9..bee5dd508 100644
          items: {
            type: "string",
            description: "Exclusion glob",
-@@ -425,10 +426,13 @@ export const searchCodeTool: Tool = {
+@@ -425,9 +302,11 @@ export const searchCodeTool: Tool = {
          stdout = results.stdout;
          stderr = results.stderr;
        } else {
 -        const results = await searchWithNode(
-+        // No ripgrep: use the native grep/findstr fallback. The old
-+        // searchWithNode helper was accidentally nested inside another
-+        // function and could never be called here.
++        // No ripgrep: use the native grep/findstr fallback.
 +        const results = await searchWithGrepOrFindstr(
            args.pattern,
            searchPath,
--          options,
 +          args.file_pattern ?? args.glob,
+           options,
          );
          stdout = results.stdout;
-         stderr = results.stderr;
+@@ -448,8 +327,15 @@ export const searchCodeTool: Tool = {
+       const maxResults = getSearchMaxResults();
+       const maxResultChars = getSearchMaxResultChars();
+ 
+-      const splitLines = stdout.split("\n");
+-      const lines = splitLines.filter((line) => line.length <= maxResultChars);
++      const splitLines = stdout.split("\n").filter((line) => line.length > 0);
++      // Never drop a match just because its line is long: that previously
++      // made grep report "No matches found" when the only hit was a minified
++      // or generated line. Truncate the line instead.
++      const lines = splitLines.map((line) =>
++        line.length > maxResultChars
++          ? `${line.slice(0, maxResultChars)}… [line truncated]`
++          : line,
++      );
+       if (lines.length === 0) {
+         return `No matches found for pattern "${args.pattern}"${
+           args.file_pattern ? ` in files matching "${args.file_pattern}"` : ""
+@@ -475,6 +361,9 @@ export const searchCodeTool: Tool = {
+           args.file_pattern ? ` in files matching "${args.file_pattern}"` : ""
+         }.`;
+       }
++      if (error.code === 2) {
++        return `Search failed for pattern "${args.pattern}": the regex is invalid. Set fixedStrings: true for literal text, or fix the regex. ${error.message}`;
++      }
+       throw new Error(
+         `Error executing search: ${
+           error instanceof Error ? error.message : String(error)
 diff --git a/extensions/cli/src/tools/textToolMode.test.ts b/extensions/cli/src/tools/textToolMode.test.ts
-index cb1d688fd..766b7936d 100644
+index cb1d688fd..782e4362e 100644
 --- a/extensions/cli/src/tools/textToolMode.test.ts
 +++ b/extensions/cli/src/tools/textToolMode.test.ts
-@@ -157,7 +157,9 @@ END_ARG
+@@ -155,11 +155,50 @@ END_ARG
+     expect(toolCalls[0].arguments).toEqual({ filepath: "src/index.cs" });
+   });
  
++  it("keeps a code fence contained inside JSON arguments", () => {
++    const content = `\`\`\`tool
++${JSON.stringify(
++  {
++    name: "read_file",
++    arguments: {
++      filepath: "README.md",
++      note: "The file contains:\n\`\`\`ts\nconst x = 1;\n\`\`\`\nEnd.",
++    },
++  },
++  null,
++  2,
++)}
++\`\`\``;
++
++    const { toolCalls } = extractToolCallsFromText(content, allowed);
++
++    expect(toolCalls).toHaveLength(1);
++    expect(toolCalls[0].arguments.note).toContain("```ts");
++    expect(toolCalls[0].arguments.note).toContain("End.");
++  });
++
++  it("accepts a JSON tool block containing literal newlines", () => {
++    const content = `\`\`\`tool
++{"name": "read_file", "arguments": {"filepath": "a.ts",
++"note": "first
++second"}}
++\`\`\``;
++
++    const { toolCalls } = extractToolCallsFromText(content, allowed);
++
++    expect(toolCalls).toHaveLength(1);
++    expect(toolCalls[0].arguments.note).toBe("first\nsecond");
++  });
++
    it("detects an announcement that omitted the tool block", () => {
      expect(
 -      looksLikeToolAnnouncement("I will read the file and inspect its contents."),
@@ -1838,8 +3259,12 @@ index cb1d688fd..766b7936d 100644
 +      ),
      ).toBe(true);
      expect(looksLikeToolAnnouncement("The answer is 42.")).toBe(false);
++    // A short final answer containing an action word is not an announcement.
++    expect(looksLikeToolAnnouncement("This file is read-only.")).toBe(false);
    });
-@@ -183,9 +185,10 @@ describe("buildTextToolsInstructions", () => {
+ });
+ 
+@@ -183,13 +222,60 @@ describe("buildTextToolsInstructions", () => {
      ]);
  
      expect(instructions).toContain('language identifier "tool"');
@@ -1851,11 +3276,61 @@ index cb1d688fd..766b7936d 100644
      expect(instructions).toContain("```tool");
    });
  
+   it("returns an empty string when no tools are available", () => {
+     expect(buildTextToolsInstructions([])).toBe("");
+   });
++
++  it("uses a directory example for directory parameters", () => {
++    const instructions = buildTextToolsInstructions([
++      {
++        name: "ChangeDirectory",
++        displayName: "Change Directory",
++        description: "Changes directory",
++        parameters: {
++          type: "object",
++          required: ["path"],
++          properties: {
++            path: {
++              type: "string",
++              description: "Directory to switch to",
++            },
++          },
++        },
++        run: async () => "",
++        isBuiltIn: true,
++      } as any,
++    ]);
++
++    expect(instructions).toContain('"path": "path/to/directory"');
++  });
++
++  it("shows optional parameters when a tool has no required list", () => {
++    const instructions = buildTextToolsInstructions([
++      {
++        name: "list_files",
++        displayName: "List Files",
++        description: "Lists files",
++        parameters: {
++          type: "object",
++          properties: {
++            directory: { type: "string" },
++            recursive: { type: "boolean" },
++          },
++        },
++        run: async () => "",
++        isBuiltIn: true,
++      } as any,
++    ]);
++
++    expect(instructions).toContain('"directory": "path/to/directory"');
++    expect(instructions).toContain('"recursive": false');
++  });
+ });
 diff --git a/extensions/cli/src/tools/textToolMode.ts b/extensions/cli/src/tools/textToolMode.ts
-index 8a853993c..786e1ebd7 100644
+index 8a853993c..8611d9717 100644
 --- a/extensions/cli/src/tools/textToolMode.ts
 +++ b/extensions/cli/src/tools/textToolMode.ts
-@@ -45,6 +45,137 @@ export interface ChatCompletionToolLike {
+@@ -45,6 +45,151 @@ export interface ChatCompletionToolLike {
    };
  }
  
@@ -1902,6 +3377,9 @@ index 8a853993c..786e1ebd7 100644
 +  question: "question for the user",
 +  title: "title",
 +  directory: "path/to/directory",
++  dirpath: "path/to/directory",
++  dirPath: "path/to/directory",
++  directory_path: "path/to/directory",
 +  target: "path/to/target",
 +  project: "path/to/project.csproj",
 +  task_id: "task-id",
@@ -1912,11 +3390,15 @@ index 8a853993c..786e1ebd7 100644
 +  if (schema?.enum?.length) {
 +    return String(schema.enum[0]);
 +  }
++  if (/(directory|folder)/i.test(schema?.description ?? "")) {
++    return "path/to/directory";
++  }
 +  if (SAMPLE_VALUES[name]) {
 +    return SAMPLE_VALUES[name];
 +  }
 +  if (/url/i.test(name)) return "https://example.com";
-+  if (/(path|file|dir)/i.test(name)) return "path/to/file.ts";
++  if (/dir/i.test(name)) return "path/to/directory";
++  if (/(path|file)/i.test(name)) return "path/to/file.ts";
 +  if (/(pattern|query|search)/i.test(name)) return "search text";
 +  if (/(content|text|body|patch)/i.test(name)) return `sample ${name}`;
 +  return `<${name}>`;
@@ -1951,10 +3433,17 @@ index 8a853993c..786e1ebd7 100644
 +}
 +
 +export function buildToolArgumentExample(parameters: any): Record<string, any> {
++  const properties = parameters?.properties ?? {};
++  // When a tool has no explicit required list, show every known parameter in
++  // the example. Passing [] here would produce an empty `arguments` object and
++  // the model would not see the expected syntax.
++  const required = parameters?.required?.length
++    ? parameters.required
++    : Object.keys(properties);
 +  return sampleValueForSchema("arguments", {
 +    type: "object",
-+    properties: parameters?.properties ?? {},
-+    required: parameters?.required ?? [],
++    properties,
++    required,
 +  });
 +}
 +
@@ -1993,7 +3482,7 @@ index 8a853993c..786e1ebd7 100644
  /**
   * Builds the system message section that describes how to call tools in
   * text mode. Mirrors the semantics of the GUI's system-message tools
-@@ -57,34 +188,40 @@ export function buildTextToolsInstructions(
+@@ -57,34 +202,111 @@ export function buildTextToolsInstructions(
      return "";
    }
  
@@ -2040,6 +3529,77 @@ index 8a853993c..786e1ebd7 100644
 -    arguments: {},
 -  });
 +  const example = buildToolCallExample(sortedTools[0]);
++  const available = new Set(tools.map((tool) => tool.name));
++  const has = (...names: string[]) => names.some((name) => available.has(name));
++
++  const selectionRules: string[] = [];
++  if (has("Read", "ReadRange", "ReadManyFiles")) {
++    const readTools = [
++      available.has("Read") ? "`Read` for a known file" : "",
++      available.has("ReadRange")
++        ? "`ReadRange` for a large file or a known line range"
++        : "",
++      available.has("ReadManyFiles") ? "`ReadManyFiles` for several files" : "",
++    ].filter(Boolean);
++    selectionRules.push(`- Read files with ${readTools.join(", ")}.`);
++  }
++  const findTools = [
++    available.has("Search") ? "`Search` for text" : "",
++    available.has("Glob") ? "`Glob` for file paths" : "",
++    available.has("List") ? "`List` for directory contents" : "",
++  ].filter(Boolean);
++  if (findTools.length > 0) {
++    selectionRules.push(`- Find with ${findTools.join(", ")}.`);
++  }
++  if (has("ApplyPatch", "Edit", "MultiEdit", "Write")) {
++    const editParts: string[] = [];
++    if (available.has("ApplyPatch")) {
++      editParts.push(
++        "**To modify existing files, use `ApplyPatch` by default.** It applies one atomic patch to one or more files and is the Continue equivalent of `apply_patch`.",
++      );
++    }
++    const exactTools = [
++      available.has("Edit") ? "`Edit`" : "",
++      available.has("MultiEdit") ? "`MultiEdit`" : "",
++    ].filter(Boolean);
++    if (exactTools.length > 0) {
++      editParts.push(
++        `Use ${exactTools.join(" or ")} only for a small exact replacement when writing a patch is awkward.`,
++      );
++    }
++    if (available.has("Write")) {
++      editParts.push(
++        "Use `Write` only for a new file or a complete rewrite.",
++      );
++    }
++    editParts.push(
++      "If you have not read the file or range you are about to edit, read it first.",
++    );
++    selectionRules.push(`- ${editParts.join(" ")}`);
++  }
++  if (available.has("Bash")) {
++    selectionRules.push(
++      "- Never use `Bash` with `sed`, `awk`, `cat >`, `echo >`, `tee`, PowerShell redirection or a Python script to read or modify project files. Use `Bash` only for commands that have no dedicated tool.",
++    );
++  }
++  if (available.has("ChangeDirectory")) {
++    selectionRules.push(
++      "- Use `ChangeDirectory` to change the persistent working directory. A `cd` inside `Bash` only affects that single command.",
++    );
++  }
++  if (has("ReadManyFiles", "ApplyPatch")) {
++    selectionRules.push(
++      "- If a task needs several files, prefer one `ReadManyFiles` or one `ApplyPatch` call over many one-by-one calls.",
++    );
++  }
++  if (available.has("AskQuestion")) {
++    selectionRules.push(
++      "- When you need a clarification, a preference or a decision from the user, call `AskQuestion`. Do not write a question as prose and end the turn: `AskQuestion` is how you get an interactive answer. Keep the question short and provide concise options (use an empty options array for free-form input).",
++    );
++  }
++  if (selectionRules.length === 0) {
++    selectionRules.push("- Use only the tools listed in this message.");
++  }
  
    return `
  
@@ -2052,7 +3612,7 @@ index 8a853993c..786e1ebd7 100644
  ONE fenced code block per tool call, with the language identifier "${TEXT_TOOL_FENCE}",
  and a single JSON object as the body:
  
-@@ -92,20 +229,48 @@ and a single JSON object as the body:
+@@ -92,20 +314,32 @@ and a single JSON object as the body:
  ${example}
  \`\`\`
  
@@ -2072,25 +3632,7 @@ index 8a853993c..786e1ebd7 100644
 -Available tools:
 +## Tool selection rules
 +
-+- Read before editing: use \`Read\`, \`ReadRange\`, \`ReadManyFiles\`, \`List\`,
-+  \`Glob\` or \`Search\` to inspect the workspace.
-+- **To modify existing files, use \`ApplyPatch\` by default.** It applies one
-+  atomic patch to one or more files and is the Continue equivalent of
-+  \`apply_patch\`. Use \`Edit\`/\`MultiEdit\` only for a small exact replacement
-+  when writing a patch is awkward. Use \`Write\` only for a new file or a
-+  complete rewrite.
-+- Never use \`Bash\` with \`sed\`, \`awk\`, \`cat >\`, \`echo >\`, \`tee\`,
-+  PowerShell redirection or a Python script to read or modify project files.
-+  \`Bash\` is for builds, tests, git, package managers and commands that have
-+  no dedicated tool.
-+- Use \`ChangeDirectory\` to change the persistent working directory. A \`cd\`
-+  inside \`Bash\` only affects that single command.
-+- If a task needs several files, prefer one \`ReadManyFiles\` or one
-+  \`ApplyPatch\` call over many one-by-one calls.
-+- When you need a clarification, a preference or a decision from the user,
-+  call \`AskQuestion\`. Do not write a question as prose and end the turn:
-+  \`AskQuestion\` is how you get an interactive answer. Keep the question short
-+  and provide concise options (use an empty options array for free-form input).
++${selectionRules.join("\n")}
 +
 +## Protocol rules
 +
@@ -2098,7 +3640,9 @@ index 8a853993c..786e1ebd7 100644
 +- \`arguments\` MUST contain every parameter listed as **required**. A call with
 +  a missing required parameter is rejected before execution.
 +- Use a JSON object for \`arguments\`, never a JSON string.
-+- Multiple tool calls: write several blocks; they run in the order written.
++- Multiple tool calls: write several blocks; they are processed in order.
++  Independent read-only calls may run concurrently; write/edit calls run one
++  at a time.
 +- Do not put tool calls inside other code blocks or XML tags.
 +- Execute the tool call immediately. Do not write "I will read...", "I will
 +  search...", "Je vais..." or similar narration before the block.
@@ -2115,7 +3659,7 @@ index 8a853993c..786e1ebd7 100644
  
  ${toolDocs}
  </context>
-@@ -126,10 +291,7 @@ export function extractToolCallsFromText(
+@@ -126,10 +360,7 @@ export function extractToolCallsFromText(
    const seen = new Set<string>();
    const allowedNames = Array.from(allowedToolNames);
  
@@ -2127,102 +3671,158 @@ index 8a853993c..786e1ebd7 100644
      const name =
        resolveToolName(rawName, allowedNames) ??
        (allowedToolNames.has(rawName) ? rawName : undefined);
-@@ -150,6 +312,41 @@ export function extractToolCallsFromText(
+@@ -150,46 +381,7 @@ export function extractToolCallsFromText(
      });
    };
  
-+  const addFromParsed = (parsed: any) => {
-+    const name =
-+      typeof parsed?.name === "string"
-+        ? parsed.name
-+        : typeof parsed?.tool_name === "string"
-+          ? parsed.tool_name
-+          : typeof parsed?.toolName === "string"
-+            ? parsed.toolName
-+            : typeof parsed?.tool === "string"
-+              ? parsed.tool
-+              : typeof parsed?.function === "string"
-+                ? parsed.function
-+                : undefined;
-+    if (!name) {
-+      return;
-+    }
-+
-+    let args =
-+      parsed?.arguments ?? parsed?.args ?? parsed?.parameters ?? parsed?.params;
-+    if (typeof args === "string") {
-+      try {
-+        args = JSON.parse(args);
-+      } catch {
-+        args = {};
-+      }
-+    }
-+    if (args === null || args === undefined) {
-+      args = {};
-+    }
-+    if (typeof args !== "object" || Array.isArray(args)) {
-+      return;
-+    }
-+    addToolCall(name, args);
-+  };
-+
-   const fenceRegex = /```([^\n`]*)\n([\s\S]*?)```/g;
- 
-   let match: RegExpExecArray | null;
-@@ -161,13 +358,13 @@ export function extractToolCallsFromText(
-     }
- 
-     if (info === "tool" && /(?:tool_name|tool_name:|TOOL_NAME)/i.test(body)) {
--      const nameMatch =
--        body.match(/(?:TOOL_NAME|tool_name)\s*:?\s*\n?\s*([^\n]+)/i);
-+      const nameMatch = body.match(
-+        /(?:TOOL_NAME|tool_name)\s*:?\s*\n?\s*([^\n]+)/i,
-+      );
-       if (nameMatch?.[1]) {
-         const name = nameMatch[1].trim();
-         const args: Record<string, any> = {};
--        const argRegex =
--          /BEGIN_ARG:\s*([^\n]+)\n([\s\S]*?)\nEND_ARG/gi;
-+        const argRegex = /BEGIN_ARG:\s*([^\n]+)\n([\s\S]*?)\nEND_ARG/gi;
-         let argMatch: RegExpExecArray | null;
-         while ((argMatch = argRegex.exec(body)) !== null) {
-           const key = argMatch[1].trim();
-@@ -190,41 +387,27 @@ export function extractToolCallsFromText(
-       continue;
-     }
- 
--    const name =
--      typeof parsed?.name === "string"
--        ? parsed.name
--        : typeof parsed?.tool_name === "string"
--          ? parsed.tool_name
--          : typeof parsed?.toolName === "string"
--            ? parsed.toolName
--            : typeof parsed?.tool === "string"
--              ? parsed.tool
--              : typeof parsed?.function === "string"
--                ? parsed.function
--                : undefined;
--    if (!name) {
+-  const fenceRegex = /```([^\n`]*)\n([\s\S]*?)```/g;
+-
+-  let match: RegExpExecArray | null;
+-  while ((match = fenceRegex.exec(content)) !== null) {
+-    const info = (match[1] ?? "").trim().toLowerCase();
+-    const body = (match[2] ?? "").trim();
+-    if (info !== TEXT_TOOL_FENCE && info !== "json") {
 -      continue;
 -    }
-+    addFromParsed(parsed);
-+  }
+-
+-    if (info === "tool" && /(?:tool_name|tool_name:|TOOL_NAME)/i.test(body)) {
+-      const nameMatch =
+-        body.match(/(?:TOOL_NAME|tool_name)\s*:?\s*\n?\s*([^\n]+)/i);
+-      if (nameMatch?.[1]) {
+-        const name = nameMatch[1].trim();
+-        const args: Record<string, any> = {};
+-        const argRegex =
+-          /BEGIN_ARG:\s*([^\n]+)\n([\s\S]*?)\nEND_ARG/gi;
+-        let argMatch: RegExpExecArray | null;
+-        while ((argMatch = argRegex.exec(body)) !== null) {
+-          const key = argMatch[1].trim();
+-          const value = argMatch[2].trim();
+-          try {
+-            args[key] = JSON.parse(value);
+-          } catch {
+-            args[key] = value;
+-          }
+-        }
+-        addToolCall(name, args);
+-      }
+-      continue;
+-    }
+-
+-    let parsed: any;
+-    try {
+-      parsed = JSON.parse(body);
+-    } catch {
+-      continue;
+-    }
+-
++  const addFromParsed = (parsed: any) => {
+     const name =
+       typeof parsed?.name === "string"
+         ? parsed.name
+@@ -203,14 +395,11 @@ export function extractToolCallsFromText(
+                 ? parsed.function
+                 : undefined;
+     if (!name) {
+-      continue;
++      return;
+     }
  
--    let args =
+     let args =
 -      parsed?.arguments ??
 -      parsed?.args ??
 -      parsed?.parameters ??
 -      parsed?.params;
--    if (typeof args === "string") {
--      try {
--        args = JSON.parse(args);
--      } catch {
--        args = {};
--      }
--    }
--    if (args === null || args === undefined) {
--      args = {};
++      parsed?.arguments ?? parsed?.args ?? parsed?.parameters ?? parsed?.params;
+     if (typeof args === "string") {
+       try {
+         args = JSON.parse(args);
+@@ -222,9 +411,106 @@ export function extractToolCallsFromText(
+       args = {};
+     }
+     if (typeof args !== "object" || Array.isArray(args)) {
+-      continue;
++      return;
+     }
+     addToolCall(name, args);
++  };
++
++  // Parse a fenced block. Returns false when the body is not valid yet, so
++  // the caller can extend the candidate to the next closing fence. This is
++  // required for ApplyPatch/Write payloads that themselves contain ``` code
++  // blocks: the first closing fence is inside the JSON string, not the end of
++  // the tool block.
++  const addFromFence = (info: string, body: string): boolean => {
++    if (info === "tool" && /(?:tool_name|TOOL_NAME)/i.test(body)) {
++      const nameMatch = body.match(
++        /(?:TOOL_NAME|tool_name)\s*:?\s*\n?\s*([^\n]+)/i,
++      );
++      if (!nameMatch?.[1]) {
++        return false;
++      }
++      const name = nameMatch[1].trim();
++      const args: Record<string, any> = {};
++      const argRegex = /BEGIN_ARG:\s*([^\n]+)\n([\s\S]*?)\nEND_ARG/gi;
++      let argMatch: RegExpExecArray | null;
++      while ((argMatch = argRegex.exec(body)) !== null) {
++        const key = argMatch[1].trim();
++        const value = argMatch[2].trim();
++        try {
++          args[key] = JSON.parse(value);
++        } catch {
++          args[key] = value;
++        }
++      }
++      addToolCall(name, args);
++      return true;
++    }
++
++    const parsed = tryParseToolArguments(body);
++    if (!parsed) {
++      return false;
++    }
++    addFromParsed(parsed);
++    return true;
++  };
++
++  const fenceStartRegex = /```([^\n`]*)\n/g;
++  let scanFrom = 0;
++  while (true) {
++    fenceStartRegex.lastIndex = scanFrom;
++    const start = fenceStartRegex.exec(content);
++    if (!start) {
++      break;
++    }
++
++    const info = (start[1] ?? "").trim().toLowerCase();
++    const bodyStart = start.index + start[0].length;
++    if (info !== TEXT_TOOL_FENCE && info !== "json") {
++      scanFrom = bodyStart;
++      continue;
++    }
++
++    let handled = false;
++    let closeFrom = bodyStart;
++    while (true) {
++      const close = content.indexOf("```", closeFrom);
++      if (close === -1) {
++        break;
++      }
++      const body = content.slice(bodyStart, close).trim();
++      if (addFromFence(info, body)) {
++        handled = true;
++        scanFrom = close + 3;
++        break;
++      }
++      closeFrom = close + 3;
++    }
++
++    if (!handled) {
++      // Malformed block: resume after its opening so a valid nested or
++      // following tool block can still be recovered.
++      scanFrom = bodyStart;
++    }
++  }
++
 +  // Some models omit the fence entirely and return only the JSON object.
 +  const bareJson = content.trim();
 +  if (bareJson.startsWith("{") && bareJson.endsWith("}")) {
@@ -2230,9 +3830,7 @@ index 8a853993c..786e1ebd7 100644
 +      addFromParsed(JSON.parse(bareJson));
 +    } catch {
 +      // Not a single JSON object; ignore.
-     }
--    if (typeof args !== "object" || Array.isArray(args)) {
--      continue;
++    }
 +  }
 +
 +  // Legacy Continue format: <tool>{"name": "...", "arguments": {...}}</tool>
@@ -2242,12 +3840,11 @@ index 8a853993c..786e1ebd7 100644
 +      addFromParsed(JSON.parse((match[1] ?? "").trim()));
 +    } catch {
 +      // Ignore malformed legacy blocks.
-     }
--    addToolCall(name, args);
++    }
    }
  
    // Fallback for models that ignore the fence instruction and emit their
-@@ -243,13 +426,11 @@ export function extractToolCallsFromText(
+@@ -243,13 +529,11 @@ export function extractToolCallsFromText(
  
    // VS Code/system-tool style and weaker providers sometimes emit the
    // TOOL_NAME/BEGIN_ARG format without a surrounding fence.
@@ -2263,14 +3860,17 @@ index 8a853993c..786e1ebd7 100644
      let argMatch: RegExpExecArray | null;
      while ((argMatch = argRegex.exec(match[0])) !== null) {
        const key = argMatch[1].trim();
-@@ -276,5 +457,7 @@ export function looksLikeToolAnnouncement(content: string): boolean {
+@@ -275,6 +559,9 @@ export function looksLikeToolAnnouncement(content: string): boolean {
+   const announcements =
      /\b(i(?:'|’)ll|i will|i'm going to|i am going to|let me|i need to|i should|i have to|next i(?:'|’)ll|je vais|je dois|je vais devoir|j'utilise|je vais utiliser)\b/i;
    const actionWords =
-     /\b(read|search|inspect|analyze|analyse|edit|modify|run|grep|glob|list|check|fetch|open)\w*\b/i;
+-    /\b(read|search|inspect|analyze|analyse|edit|modify|run|grep|glob|list|check|fetch|open)\w*\b/i;
 -  return announcements.test(lower) || (actionWords.test(lower) && lower.length < 600);
-+  return (
-+    announcements.test(lower) || (actionWords.test(lower) && lower.length < 600)
-+  );
++    /\b(read|search|inspect|analyze|analyse|edit|modify|run|grep|glob|list|check|fetch|open|lire|chercher|modifier|exécuter|verifier|vérifier|ouvrir|analyser)\w*\b/i;
++  // Both parts are required: a short final answer such as "the file is
++  // read-only" contains an action word but is not an announcement, and
++  // nudging it would lose a valid answer.
++  return announcements.test(lower) && actionWords.test(lower);
  }
 diff --git a/extensions/cli/src/tools/types.ts b/extensions/cli/src/tools/types.ts
 index 612bd22ff..6b270e484 100644
@@ -2284,13 +3884,77 @@ index 612bd22ff..6b270e484 100644
      properties?: Record<string, ParameterSchema>;
      required?: string[];
    };
+diff --git a/extensions/cli/src/tools/validateToolArgs.test.ts b/extensions/cli/src/tools/validateToolArgs.test.ts
+new file mode 100644
+index 000000000..6b84d1e2c
+--- /dev/null
++++ b/extensions/cli/src/tools/validateToolArgs.test.ts
+@@ -0,0 +1,53 @@
++import { describe, expect, it } from "vitest";
++
++import { Tool } from "./types.js";
++import {
++  buildToolCallRejectionMessage,
++  buildToolUsageReminderForCliTool,
++  validateToolArguments,
++} from "./validateToolArgs.js";
++
++const testTool: Tool = {
++  name: "Read",
++  displayName: "Read",
++  description: "Read a file",
++  parameters: {
++    type: "object",
++    required: ["filepath"],
++    properties: {
++      filepath: { type: "string", description: "The path to read" },
++    },
++  },
++  readonly: true,
++  isBuiltIn: true,
++  run: async () => "",
++};
++
++describe("tool argument errors", () => {
++  it("uses the text tool fence in text mode", () => {
++    const reminder = buildToolUsageReminderForCliTool(testTool, "text");
++    expect(reminder).toContain("```tool");
++    expect(reminder).toContain('"filepath": "path/to/file.ts"');
++  });
++
++  it("does not prescribe a text fence in native mode", () => {
++    const reminder = buildToolUsageReminderForCliTool(testTool, "native");
++    expect(reminder).not.toContain("```tool");
++    expect(reminder).toContain("Example arguments (JSON)");
++    expect(reminder).toContain('"filepath": "path/to/file.ts"');
++  });
++
++  it("includes the corrected arguments in the rejection message", () => {
++    const issues = validateToolArguments(testTool, {});
++    const message = buildToolCallRejectionMessage(
++      testTool,
++      {},
++      issues,
++      "native",
++    );
++
++    expect(message).toContain("missing required parameter");
++    expect(message).toContain("Example arguments (JSON)");
++    expect(message).not.toContain("```tool");
++  });
++});
 diff --git a/extensions/cli/src/tools/validateToolArgs.ts b/extensions/cli/src/tools/validateToolArgs.ts
 new file mode 100644
-index 000000000..d6420e9b7
+index 000000000..73bc2b6d3
 --- /dev/null
 +++ b/extensions/cli/src/tools/validateToolArgs.ts
-@@ -0,0 +1,137 @@
-+import { buildToolCallExample } from "./textToolMode.js";
+@@ -0,0 +1,163 @@
++import type { ToolMode } from "../permissions/types.js";
++
++import {
++  buildToolArgumentExample,
++  buildToolCallExample,
++} from "./textToolMode.js";
 +import { Tool } from "./types.js";
 +
 +export interface ToolArgumentIssue {
@@ -2355,11 +4019,13 @@ index 000000000..d6420e9b7
 +
 +  if (expectedType === "string" && typeof value !== "string") {
 +    issues.push({ path, message: "must be a string" });
-+  } else if (
-+    (expectedType === "number" || expectedType === "integer") &&
-+    typeof value !== "number"
-+  ) {
++  } else if (expectedType === "number" && typeof value !== "number") {
 +    issues.push({ path, message: "must be a number" });
++  } else if (
++    expectedType === "integer" &&
++    (typeof value !== "number" || !Number.isSafeInteger(value))
++  ) {
++    issues.push({ path, message: "must be an integer" });
 +  } else if (expectedType === "boolean" && typeof value !== "boolean") {
 +    issues.push({ path, message: "must be a boolean" });
 +  }
@@ -2374,10 +4040,24 @@ index 000000000..d6420e9b7
 +  return issues;
 +}
 +
-+export function buildToolUsageReminderForCliTool(tool: Tool): string {
++export function buildToolUsageReminderForCliTool(
++  tool: Tool,
++  toolMode: ToolMode = "text",
++): string {
 +  const required = tool.parameters.required?.length
 +    ? tool.parameters.required.join(", ")
 +    : "none";
++
++  if (toolMode === "native") {
++    return [
++      `Tool usage reminder for "${tool.name}":`,
++      `Required: ${required}`,
++      "Example arguments (JSON):",
++      JSON.stringify(buildToolArgumentExample(tool.parameters), null, 2),
++      "Call the tool again using the same native tool-calling interface, with all required arguments.",
++    ].join("\n");
++  }
++
 +  return [
 +    `Tool usage reminder for "${tool.name}":`,
 +    `Required: ${required}`,
@@ -2397,6 +4077,7 @@ index 000000000..d6420e9b7
 +  tool: Tool,
 +  args: Record<string, any>,
 +  issues: ToolArgumentIssue[],
++  toolMode: ToolMode = "text",
 +): string {
 +  const problemLines = issues
 +    .map((issue) => `- ${issue.path}: ${issue.message}`)
@@ -2415,18 +4096,36 @@ index 000000000..d6420e9b7
 +    `Required: ${required}`,
 +    `Schema: ${JSON.stringify(tool.parameters)}`,
 +    "",
-+    "Correct example:",
-+    "```tool",
-+    buildToolCallExample({
-+      name: tool.name,
-+      description: tool.description,
-+      parameters: tool.parameters,
-+    }),
-+    "```",
++    toolMode === "native" ? "Example arguments (JSON):" : "Correct example:",
++    ...(toolMode === "native"
++      ? [JSON.stringify(buildToolArgumentExample(tool.parameters), null, 2)]
++      : [
++          "```tool",
++          buildToolCallExample({
++            name: tool.name,
++            description: tool.description,
++            parameters: tool.parameters,
++          }),
++          "```",
++        ]),
 +    "",
 +    "Fix the arguments and call the tool again. Do not repeat the same invalid call.",
 +  ].join("\n");
 +}
+diff --git a/extensions/cli/src/tools/writeFile.ts b/extensions/cli/src/tools/writeFile.ts
+index 20ecd491f..e4c677d5b 100644
+--- a/extensions/cli/src/tools/writeFile.ts
++++ b/extensions/cli/src/tools/writeFile.ts
+@@ -31,7 +31,8 @@ export function generateDiff(
+ export const writeFileTool: Tool = {
+   name: "Write",
+   displayName: "Write",
+-  description: "Write content to a file at the specified path",
++  description:
++    "Create a new file or completely rewrite an existing file. For small changes, prefer ApplyPatch, Edit or MultiEdit instead of rewriting the whole file.",
+   parameters: {
+     type: "object",
+     required: ["filepath", "content"],
 diff --git a/extensions/cli/src/ui/TUIChat.tsx b/extensions/cli/src/ui/TUIChat.tsx
 index 924583423..26c2bb7f5 100644
 --- a/extensions/cli/src/ui/TUIChat.tsx
@@ -2580,7 +4279,7 @@ index 6301c2204..8c05b3481 100644
        // Switch back to normal
        toolPermissionService.switchMode("normal");
 diff --git a/extensions/cli/src/ui/components/StaticChatContent.tsx b/extensions/cli/src/ui/components/StaticChatContent.tsx
-index 09f9d8bf5..bd15f94f1 100644
+index 09f9d8bf5..8921d55af 100644
 --- a/extensions/cli/src/ui/components/StaticChatContent.tsx
 +++ b/extensions/cli/src/ui/components/StaticChatContent.tsx
 @@ -1,6 +1,6 @@
@@ -2591,7 +4290,13 @@ index 09f9d8bf5..bd15f94f1 100644
  
  import type { ChatHistoryItem } from "../../../../../core/index.js";
  import type { MCPService } from "../../services/MCPService.js";
-@@ -41,34 +41,17 @@ export const StaticChatContent: React.FC<StaticChatContentProps> = ({
+@@ -36,39 +36,22 @@ export const StaticChatContent: React.FC<StaticChatContentProps> = ({
+   renderMessage,
+   refreshTrigger,
+ }) => {
+-  const { columns, rows } = useTerminalSize();
++  const { columns } = useTerminalSize();
+   const { stdout } = useStdout();
  
    // State for managing static refresh with key-based remounting
    const [staticKey, setStaticKey] = useState(0);
@@ -2716,7 +4421,7 @@ index 000000000..b09b0a5a4
 +  });
 +});
 diff --git a/extensions/cli/src/util/workspace.ts b/extensions/cli/src/util/workspace.ts
-index 6d1939b66..0db2d9a13 100644
+index 6d1939b66..f1a0973a5 100644
 --- a/extensions/cli/src/util/workspace.ts
 +++ b/extensions/cli/src/util/workspace.ts
 @@ -2,6 +2,8 @@ import fs from "node:fs";
@@ -2728,7 +4433,44 @@ index 6d1939b66..0db2d9a13 100644
  const recentDirectories = new Set<string>();
  
  function expandTilde(input: string): string {
-@@ -70,6 +72,44 @@ export function changeWorkspace(input: string): {
+@@ -47,20 +49,33 @@ export function changeWorkspace(input: string): {
+       message: `Invalid workspace path: ${error instanceof Error ? error.message : String(error)}`,
+     };
+   }
+-  if (!fs.existsSync(resolved)) {
++  let stats: fs.Stats;
++  try {
++    stats = fs.statSync(resolved);
++  } catch {
+     return {
+       success: false,
+       message: `Workspace does not exist: ${resolved}`,
+     };
+   }
+-  if (!fs.statSync(resolved).isDirectory()) {
++  if (!stats.isDirectory()) {
+     return {
+       success: false,
+       message: `Not a directory: ${resolved}`,
+     };
+   }
+ 
+-  process.chdir(resolved);
++  try {
++    process.chdir(resolved);
++  } catch (error) {
++    return {
++      success: false,
++      message: `Cannot change to ${resolved}: ${
++        error instanceof Error ? error.message : String(error)
++      }`,
++    };
++  }
++
+   recentDirectories.delete(resolved);
+   recentDirectories.add(resolved);
+   return {
+@@ -70,6 +85,44 @@ export function changeWorkspace(input: string): {
    };
  }
  
@@ -2773,7 +4515,7 @@ index 6d1939b66..0db2d9a13 100644
  export function getDirectorySuggestions(
    input: string,
    limit: number = 12,
-@@ -84,8 +124,7 @@ export function getDirectorySuggestions(
+@@ -84,8 +137,7 @@ export function getDirectorySuggestions(
    }
  
    const absolute = path.resolve(expanded);
@@ -2783,8 +4525,211 @@ index 6d1939b66..0db2d9a13 100644
    const base = endsWithSeparator ? absolute : path.dirname(absolute);
    const prefix = endsWithSeparator ? "" : path.basename(absolute).toLowerCase();
    if (!fs.existsSync(base) || !fs.statSync(base).isDirectory()) {
+diff --git a/gui/src/components/StyledMarkdownPreview/StepContainerPreToolbar/ApplyActions.tsx b/gui/src/components/StyledMarkdownPreview/StepContainerPreToolbar/ApplyActions.tsx
+index 66e5f97e1..828b7cf08 100644
+--- a/gui/src/components/StyledMarkdownPreview/StepContainerPreToolbar/ApplyActions.tsx
++++ b/gui/src/components/StyledMarkdownPreview/StepContainerPreToolbar/ApplyActions.tsx
+@@ -22,7 +22,7 @@ export function ApplyActions(props: ApplyActionsProps) {
+   switch (props.applyState ? props.applyState.status : null) {
+     case "streaming":
+       return (
+-        <div className="bg-badge flex select-none items-center rounded pl-2 pr-1">
++        <div className="bg-badge flex shrink-0 select-none items-center rounded pl-2 pr-1">
+           <span className="text-lightgray inline-flex items-center gap-2 text-center text-xs">
+             Applying
+             <Spinner />
+@@ -31,7 +31,7 @@ export function ApplyActions(props: ApplyActionsProps) {
+       );
+     case "done":
+       return (
+-        <div className="bg-badge flex select-none items-center rounded sm:gap-1 md:px-1.5">
++        <div className="bg-badge flex shrink-0 select-none items-center rounded sm:gap-1 md:px-1.5">
+           <span className="text-lightgray flex items-center text-center text-xs max-md:hidden">
+             {`${props.applyState?.numDiffs === 1 ? "1 diff" : `${props.applyState?.numDiffs} diffs`}`}
+           </span>
+diff --git a/gui/src/components/StyledMarkdownPreview/StepContainerPreToolbar/index.tsx b/gui/src/components/StyledMarkdownPreview/StepContainerPreToolbar/index.tsx
+index f9d268ccc..68d90e2a1 100644
+--- a/gui/src/components/StyledMarkdownPreview/StepContainerPreToolbar/index.tsx
++++ b/gui/src/components/StyledMarkdownPreview/StepContainerPreToolbar/index.tsx
+@@ -297,7 +297,7 @@ export function StepContainerPreToolbar({
+         className={`find-widget-skip bg-editor sticky -top-2 z-10 m-0 flex items-center justify-between gap-3 px-1.5 py-1 ${isExpanded ? "rounded-t-default border-command-border border-b" : "rounded-default"}`}
+         style={{ fontSize: `${getFontSize() - 2}px` }}
+       >
+-        <div className="flex max-w-[50%] flex-row items-center">
++        <div className="flex min-w-0 max-w-[50%] flex-row items-center overflow-hidden">
+           {toolCallStatusIcon}
+           <ChevronDownIcon
+             data-testid="toggle-codeblock"
+@@ -319,7 +319,7 @@ export function StepContainerPreToolbar({
+           )}
+         </div>
+ 
+-        <div className="flex items-center gap-2.5">
++        <div className="flex shrink-0 items-center gap-2.5">
+           {!isGeneratingCodeBlock && (
+             <div className="xs:flex hidden items-center gap-2.5">
+               <InsertButton onInsert={onClickInsertAtCursor} />
+diff --git a/gui/src/components/StyledMarkdownPreview/index.tsx b/gui/src/components/StyledMarkdownPreview/index.tsx
+index 2ff217a61..17370da1b 100644
+--- a/gui/src/components/StyledMarkdownPreview/index.tsx
++++ b/gui/src/components/StyledMarkdownPreview/index.tsx
+@@ -66,8 +66,8 @@ const StyledMarkdown = styled.div<{
+     background-color: ${vscEditorBackground};
+     border-radius: ${defaultBorderRadius};
+ 
+-    max-width: calc(100vw - 24px);
+-    overflow-x: scroll;
++    max-width: 100%;
++    overflow-x: auto;
+     overflow-y: hidden;
+ 
+     padding: 8px;
+@@ -84,6 +84,20 @@ const StyledMarkdown = styled.div<{
+     font-family: var(--vscode-editor-font-family);
+   }
+ 
++  /* Wide tables scroll inside the message instead of widening the chat
++     column and hiding the toolbar buttons on the right. */
++  table {
++    display: block;
++    width: max-content;
++    max-width: 100%;
++    overflow-x: auto;
++  }
++
++  img {
++    max-width: 100%;
++    height: auto;
++  }
++
+   ul ul,
+   ul ol,
+   ol ul,
+@@ -136,8 +150,12 @@ const StyledMarkdown = styled.div<{
+ 
+   * {
+     word-break: break-word;
++    overflow-wrap: anywhere;
+   }
+ 
++  min-width: 0;
++  max-width: 100%;
++
+   > *:last-child {
+     margin-bottom: 0;
+   }
+diff --git a/gui/src/components/mainInput/ContinueInputBox.tsx b/gui/src/components/mainInput/ContinueInputBox.tsx
+index c57dbd9d0..7d2f5192e 100644
+--- a/gui/src/components/mainInput/ContinueInputBox.tsx
++++ b/gui/src/components/mainInput/ContinueInputBox.tsx
+@@ -112,7 +112,7 @@ function ContinueInputBox(props: ContinueInputBoxProps) {
+       className={`${props.hidden ? "hidden" : ""}`}
+       data-testid={`continue-input-box-${props.inputId}`}
+     >
+-      <div className={`relative flex flex-col px-2`}>
++      <div className={`relative flex min-w-0 flex-col px-2`}>
+         {props.isMainInput && <Lump />}
+         <GradientBorder
+           loading={isStreaming && (props.isLastUserInput || isInEdit) ? 1 : 0}
+diff --git a/gui/src/components/mainInput/GradientBorder.tsx b/gui/src/components/mainInput/GradientBorder.tsx
+index c3b80ccca..cc5fddaa2 100644
+--- a/gui/src/components/mainInput/GradientBorder.tsx
++++ b/gui/src/components/mainInput/GradientBorder.tsx
+@@ -32,6 +32,8 @@ export const GradientBorder = styled.div<{
+   animation: ${(props) => (props.loading ? gradient : "")} 6s linear infinite;
+   background-size: 200% 200%;
+   width: 100%;
++  min-width: 0;
++  max-width: 100%;
+   display: flex;
+   flex-direction: row;
+   align-items: center;
+diff --git a/gui/src/components/mainInput/InputToolbar.tsx b/gui/src/components/mainInput/InputToolbar.tsx
+index 99a940b78..6f86dfa08 100644
+--- a/gui/src/components/mainInput/InputToolbar.tsx
++++ b/gui/src/components/mainInput/InputToolbar.tsx
+@@ -78,12 +78,12 @@ function InputToolbar(props: InputToolbarProps) {
+     <>
+       <div
+         onClick={props.onClick}
+-        className={`find-widget-skip bg-vsc-input-background flex select-none flex-row items-center justify-between gap-1 pt-1 ${props.hidden ? "pointer-events-none h-0 cursor-default opacity-0" : "pointer-events-auto mt-2 cursor-text opacity-100"}`}
++        className={`find-widget-skip bg-vsc-input-background flex min-w-0 select-none flex-row flex-wrap items-center justify-between gap-1 gap-y-1 pt-1 ${props.hidden ? "pointer-events-none h-0 cursor-default opacity-0" : "pointer-events-auto mt-2 cursor-text opacity-100"}`}
+         style={{
+           fontSize: smallFont,
+         }}
+       >
+-        <div className="xs:gap-1.5 flex flex-row items-center gap-1">
++        <div className="xs:gap-1.5 flex min-w-0 flex-1 flex-row items-center gap-1">
+           {!isInEdit && (
+             <ToolTip place="top" content="Select Mode">
+               <HoverItem className="!p-0">
+@@ -169,7 +169,7 @@ function InputToolbar(props: InputToolbarProps) {
+         </div>
+ 
+         <div
+-          className="text-description flex items-center gap-2 whitespace-nowrap"
++          className="text-description ml-auto flex shrink-0 items-center gap-2 whitespace-nowrap"
+           style={{
+             fontSize: tinyFont,
+           }}
+diff --git a/gui/src/components/mainInput/TipTapEditor/TipTapEditor.css b/gui/src/components/mainInput/TipTapEditor/TipTapEditor.css
+index 3f2a2c770..19f5a370d 100644
+--- a/gui/src/components/mainInput/TipTapEditor/TipTapEditor.css
++++ b/gui/src/components/mainInput/TipTapEditor/TipTapEditor.css
+@@ -1,3 +1,16 @@
++/*
++ * A long token typed without spaces ("aaaa..." or a pasted path/URL) used to
++ * enlarge the editor's min-content width. The whole chat column then grew
++ * wider than the viewport and pushed the send button off-screen. Allowing
++ * breaks anywhere keeps the composer inside its panel instead.
++ */
++.tiptap {
++  min-width: 0;
++  max-width: 100%;
++  overflow-wrap: anywhere;
++  word-break: break-word;
++}
++
+ .mention {
+   background-color: var(--vscode-badge-background, #bfe2b6);
+   color: var(--vscode-badge-foreground, --vscode-foreground, #000);
+diff --git a/gui/src/components/mainInput/TipTapEditor/TipTapEditor.tsx b/gui/src/components/mainInput/TipTapEditor/TipTapEditor.tsx
+index c19ae0af2..534e6caa9 100644
+--- a/gui/src/components/mainInput/TipTapEditor/TipTapEditor.tsx
++++ b/gui/src/components/mainInput/TipTapEditor/TipTapEditor.tsx
+@@ -266,7 +266,7 @@ function TipTapEditorInner(props: TipTapEditorProps) {
+     >
+       <div className="px-2.5 pb-1 pt-2">
+         <EditorContent
+-          className={`scroll-container overflow-y-scroll ${props.isMainInput ? "max-h-[70vh]" : ""}`}
++          className={`scroll-container min-w-0 max-w-full overflow-x-hidden overflow-y-scroll ${props.isMainInput ? "max-h-[70vh]" : ""}`}
+           spellCheck={false}
+           editor={editor}
+           onClick={(event) => {
+@@ -342,7 +342,7 @@ const MemoInner = memo(
+ 
+ export function TipTapEditor(props: TipTapEditorProps) {
+   return (
+-    <div className="relative w-full">
++    <div className="relative w-full min-w-0">
+       <MemoInner {...props} />
+     </div>
+   );
+diff --git a/gui/src/components/mainInput/TipTapEditor/components/StyledComponents.ts b/gui/src/components/mainInput/TipTapEditor/components/StyledComponents.ts
+index 930a8bf78..6fcc54e40 100644
+--- a/gui/src/components/mainInput/TipTapEditor/components/StyledComponents.ts
++++ b/gui/src/components/mainInput/TipTapEditor/components/StyledComponents.ts
+@@ -41,6 +41,8 @@ export const InputBoxDiv = styled.div<{}>`
+ 
+   display: flex;
+   flex-direction: column;
++  min-width: 0;
++  max-width: 100%;
+ `;
+ 
+ export const HoverDiv = styled.div`
 diff --git a/gui/src/pages/gui/Chat.tsx b/gui/src/pages/gui/Chat.tsx
-index 00e04efd1..0fdccffaa 100644
+index 00e04efd1..cefa80129 100644
 --- a/gui/src/pages/gui/Chat.tsx
 +++ b/gui/src/pages/gui/Chat.tsx
 @@ -56,7 +56,7 @@ import { cancelStream } from "../../redux/thunks/cancelStream";
@@ -2831,9 +4776,12 @@ index 00e04efd1..0fdccffaa 100644
    useEffect(() => {
      // Cmd + Backspace to delete current step
      const listener = (e: KeyboardEvent) => {
-@@ -388,28 +398,27 @@ export function Chat() {
+@@ -386,32 +396,31 @@ export function Chat() {
+ 
+       <StepsDiv
          ref={stepsDivRef}
-         className={`pt-[8px] ${showScrollbar ? "thin-scrollbar" : "no-scrollbar"} ${history.length > 0 ? "min-h-0 flex-1 overflow-y-scroll" : "shrink-0"}`}
+-        className={`pt-[8px] ${showScrollbar ? "thin-scrollbar" : "no-scrollbar"} ${history.length > 0 ? "min-h-0 flex-1 overflow-y-scroll" : "shrink-0"}`}
++        className={`pt-[8px] ${showScrollbar ? "thin-scrollbar" : "no-scrollbar"} ${history.length > 0 ? "min-h-0 min-w-0 flex-1 overflow-x-hidden overflow-y-scroll" : "min-w-0 shrink-0 overflow-x-hidden"}`}
        >
 -        <DeprecationBanner dismissable={true} />
 -        {highlights}
@@ -2877,14 +4825,142 @@ index 00e04efd1..0fdccffaa 100644
 +          )}
 +        />
        </StepsDiv>
-       <div className={"relative shrink-0"}>
+-      <div className={"relative shrink-0"}>
++      <div className={"relative min-w-0 shrink-0"}>
          <ContinueInputBox
+           isMainInput
+           isLastUserInput={false}
+diff --git a/gui/src/pages/gui/ToolCallDiv/FindAndReplace.tsx b/gui/src/pages/gui/ToolCallDiv/FindAndReplace.tsx
+index 95afc2d89..8a25dfbea 100644
+--- a/gui/src/pages/gui/ToolCallDiv/FindAndReplace.tsx
++++ b/gui/src/pages/gui/ToolCallDiv/FindAndReplace.tsx
+@@ -237,22 +237,24 @@ export function FindAndReplaceDisplay({
+         </div>
+ 
+         {applyState && (
+-          <ApplyActions
+-            onClickAccept={() => {
+-              ideMessenger.post(`acceptDiff`, {
+-                filepath: fileUri,
+-                streamId: applyState.streamId,
+-              });
+-            }}
+-            onClickReject={() => {
+-              ideMessenger.post(`rejectDiff`, {
+-                filepath: fileUri,
+-                streamId: applyState.streamId,
+-              });
+-            }}
+-            disableManualApply={true}
+-            applyState={applyState}
+-          />
++          <div className="flex shrink-0 items-center">
++            <ApplyActions
++              onClickAccept={() => {
++                ideMessenger.post(`acceptDiff`, {
++                  filepath: fileUri,
++                  streamId: applyState.streamId,
++                });
++              }}
++              onClickReject={() => {
++                ideMessenger.post(`rejectDiff`, {
++                  filepath: fileUri,
++                  streamId: applyState.streamId,
++                });
++              }}
++              disableManualApply={true}
++              applyState={applyState}
++            />
++          </div>
+         )}
+       </div>
+       {showContent ? content : null}
+diff --git a/gui/src/pages/gui/VirtualizedHistory.test.tsx b/gui/src/pages/gui/VirtualizedHistory.test.tsx
+new file mode 100644
+index 000000000..48ab23cea
+--- /dev/null
++++ b/gui/src/pages/gui/VirtualizedHistory.test.tsx
+@@ -0,0 +1,74 @@
++import { createRef } from "react";
++
++import { render, screen } from "@testing-library/react";
++import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
++
++import type { ChatHistoryItemWithMessageId } from "../../redux/slices/sessionSlice";
++
++import { VirtualizedHistory } from "./VirtualizedHistory";
++
++class MockResizeObserver {
++  observe() {}
++  unobserve() {}
++  disconnect() {}
++}
++
++function makeItems(count: number): ChatHistoryItemWithMessageId[] {
++  return Array.from({ length: count }, (_, index) => ({
++    message: {
++      id: `message-${index}`,
++      role: index % 2 === 0 ? "user" : "assistant",
++      content: `message ${index}`,
++    },
++    contextItems: [],
++  })) as ChatHistoryItemWithMessageId[];
++}
++
++function renderHistory(items: ChatHistoryItemWithMessageId[]) {
++  const scrollRef = createRef<HTMLDivElement>();
++  render(
++    <div ref={scrollRef}>
++      <VirtualizedHistory
++        scrollRef={scrollRef}
++        header={<div>header</div>}
++        footer={<div>footer</div>}
++        items={items}
++        renderItem={(item) => (
++          <div data-testid="row">{item.message.id}</div>
++        )}
++      />
++    </div>,
++  );
++}
++
++describe("VirtualizedHistory", () => {
++  beforeEach(() => {
++    vi.stubGlobal("ResizeObserver", MockResizeObserver);
++    vi.stubGlobal("requestAnimationFrame", (callback: FrameRequestCallback) => {
++      return setTimeout(() => callback(0), 0) as unknown as number;
++    });
++    vi.stubGlobal("cancelAnimationFrame", (id: number) => clearTimeout(id));
++  });
++
++  afterEach(() => {
++    vi.unstubAllGlobals();
++  });
++
++  it("keeps small conversations fully rendered for find-in-page", () => {
++    renderHistory(makeItems(100));
++
++    expect(screen.getAllByTestId("row")).toHaveLength(100);
++    expect(screen.getByText("header")).toBeTruthy();
++    expect(screen.getByText("footer")).toBeTruthy();
++  });
++
++  it("mounts only the visible window for long conversations", () => {
++    renderHistory(makeItems(150));
++
++    const rows = screen.getAllByTestId("row");
++    expect(rows.length).toBeGreaterThan(0);
++    expect(rows.length).toBeLessThan(150);
++    expect(screen.getByText("header")).toBeTruthy();
++    expect(screen.getByText("footer")).toBeTruthy();
++  });
++});
 diff --git a/gui/src/pages/gui/VirtualizedHistory.tsx b/gui/src/pages/gui/VirtualizedHistory.tsx
 new file mode 100644
-index 000000000..2739def51
+index 000000000..90efc0d5f
 --- /dev/null
 +++ b/gui/src/pages/gui/VirtualizedHistory.tsx
-@@ -0,0 +1,342 @@
+@@ -0,0 +1,358 @@
 +import {
 +  useEffect,
 +  useLayoutEffect,
@@ -2957,7 +5033,11 @@ index 000000000..2739def51
 +      <>
 +        {props.header}
 +        {props.items.map((item, index) => {
-+          return <div key={item.message.id}>{props.renderItem(item, index)}</div>;
++          return (
++            <div key={item.message.id} data-chat-message>
++              {props.renderItem(item, index)}
++            </div>
++          );
 +        })}
 +        {props.footer}
 +      </>
@@ -2980,13 +5060,15 @@ index 000000000..2739def51
 +
 +  const heights = useRef(new Map<string, number>());
 +  const observers = useRef(new Map<string, ResizeObserver>());
-+  const rowRefs = useRef(new Map<string, (element: HTMLDivElement | null) => void>());
++  const rowRefs = useRef(
++    new Map<string, (element: HTMLDivElement | null) => void>(),
++  );
 +  // Measurements arrive in batches; each batch triggers one render.
 +  const pendingMeasurements = useRef(new Map<string, number>());
 +  const measurementFrame = useRef<number | null>(null);
 +  const scrollFrame = useRef<number | null>(null);
 +  const itemsRef = useRef(items);
-+  const startIndexRef = useRef(0);
++  const firstVisibleIndexRef = useRef(0);
 +  const headerRef = useRef<HTMLDivElement>(null);
 +  const followBottom = useRef(true);
 +  const previousUserCount = useRef(0);
@@ -2997,6 +5079,7 @@ index 000000000..2739def51
 +    () => items.filter((item) => item.message.role === "user").length,
 +    [items],
 +  );
++  const firstItemId = items[0]?.message.id;
 +
 +  const offsets = useMemo(() => {
 +    const result: number[] = [];
@@ -3020,6 +5103,7 @@ index 000000000..2739def51
 +  }, [items, offsets, measureVersion]);
 +
 +  const relativeScrollTop = Math.max(0, scrollTop - headerHeight);
++  const firstVisibleIndex = findIndexAtOffset(offsets, relativeScrollTop);
 +  const startIndex = findIndexAtOffset(
 +    offsets,
 +    relativeScrollTop - OVERSCAN_PX,
@@ -3031,7 +5115,7 @@ index 000000000..2739def51
 +      relativeScrollTop + Math.max(viewportHeight, 400) + OVERSCAN_PX,
 +    ) + 1,
 +  );
-+  startIndexRef.current = startIndex;
++  firstVisibleIndexRef.current = firstVisibleIndex;
 +
 +  const scrollToBottom = () => {
 +    const element = scrollRef.current;
@@ -3060,6 +5144,7 @@ index 000000000..2739def51
 +      }
 +    };
 +
++    setScrollTop(element.scrollTop);
 +    handleScroll();
 +    element.addEventListener("scroll", handleScroll, { passive: true });
 +    return () => {
@@ -3101,6 +5186,12 @@ index 000000000..2739def51
 +  }, []);
 +
 +  useLayoutEffect(() => {
++    // A different first message means a different session (or a compaction
++    // boundary). Start at the newest message again.
++    followBottom.current = true;
++  }, [firstItemId]);
++
++  useLayoutEffect(() => {
 +    if (userCount > previousUserCount.current) {
 +      followBottom.current = true;
 +    }
@@ -3108,7 +5199,7 @@ index 000000000..2739def51
 +    if (followBottom.current) {
 +      scrollToBottom();
 +    }
-+  }, [userCount, items.length, measureVersion]);
++  }, [userCount, items.length, measureVersion, headerHeight, viewportHeight]);
 +
 +  useEffect(
 +    () => () => {
@@ -3149,7 +5240,7 @@ index 000000000..2739def51
 +          !followBottom.current &&
 +          previous !== undefined &&
 +          index >= 0 &&
-+          index < startIndexRef.current
++          index < firstVisibleIndexRef.current
 +        ) {
 +          scrollAdjustment += height - previous;
 +        }
@@ -3207,6 +5298,7 @@ index 000000000..2739def51
 +          return (
 +            <div
 +              key={item.message.id}
++              data-chat-message
 +              ref={getRowRef(item.message.id)}
 +              style={{
 +                position: "absolute",
@@ -3227,6 +5319,19 @@ index 000000000..2739def51
 +    </>
 +  );
 +}
+diff --git a/gui/src/pages/gui/index.tsx b/gui/src/pages/gui/index.tsx
+index d74b32c59..d0820a91c 100644
+--- a/gui/src/pages/gui/index.tsx
++++ b/gui/src/pages/gui/index.tsx
+@@ -7,7 +7,7 @@ export default function GUI() {
+       <aside className="4xl:flex border-vsc-input-border no-scrollbar hidden min-h-0 w-96 overflow-y-auto border-0 border-r border-solid">
+         <History />
+       </aside>
+-      <main className="no-scrollbar flex min-h-0 flex-1 flex-col">
++      <main className="no-scrollbar flex min-h-0 min-w-0 flex-1 flex-col overflow-x-hidden">
+         <Chat />
+       </main>
+     </div>
 diff --git a/gui/src/redux/slices/sessionSlice.ts b/gui/src/redux/slices/sessionSlice.ts
 index eaed1eb2d..c72c54907 100644
 --- a/gui/src/redux/slices/sessionSlice.ts
@@ -3251,28 +5356,99 @@ index eaed1eb2d..c72c54907 100644
            );
            toolCallState.toolCall.function.arguments =
 diff --git a/gui/src/redux/thunks/callToolById.ts b/gui/src/redux/thunks/callToolById.ts
-index 557b0b95b..c8b90b2af 100644
+index 557b0b95b..9e97ce12c 100644
 --- a/gui/src/redux/thunks/callToolById.ts
 +++ b/gui/src/redux/thunks/callToolById.ts
-@@ -5,6 +5,7 @@ import {
+@@ -5,8 +5,11 @@ import {
    resolveToolName,
    tryParseToolArguments,
  } from "core/tools/toolCallSanitization";
 +import { buildToolUsageReminder } from "core/tools/toolArgumentValidation";
  import { ContinueError, ContinueErrorReason } from "core/util/errors";
  
++import { getToolDeclarationMode } from "../util/toolDeclarationMode";
++
  import { callClientTool } from "../../util/clientTools/callClientTool";
-@@ -164,7 +165,7 @@ export const callToolById = createAsyncThunk<
+ import { selectSelectedChatModel } from "../slices/configSlice";
+ import {
+@@ -42,8 +45,15 @@ export const callToolById = createAsyncThunk<
+     name: toolCallState.toolCall.function.name,
+     arguments: toolCallState.parsedArgs ?? {},
+   });
+-  let repeatedCount = 0;
++  // Count only a consecutive run of the same call since the last user
++  // message. A previous implementation counted the whole session history, so
++  // reading a file again after an edit could be blocked as a "repeat".
++  const signatures: string[] = [];
+   for (const item of state.session.history) {
++    if (item.message.role === "user") {
++      signatures.length = 0;
++      continue;
++    }
+     if (item.message.role !== "assistant" || !item.message.toolCalls) {
+       continue;
+     }
+@@ -51,16 +61,23 @@ export const callToolById = createAsyncThunk<
+       if (!toolCall.function) {
+         continue;
+       }
+-      const signature = JSON.stringify({
+-        name: toolCall.function.name,
+-        arguments: tryParseToolArguments(toolCall.function.arguments) ?? {},
+-      });
+-      if (signature === repeatedSignature) {
+-        repeatedCount++;
+-      }
++      signatures.push(
++        JSON.stringify({
++          name: toolCall.function.name,
++          arguments: tryParseToolArguments(toolCall.function.arguments) ?? {},
++        }),
++      );
++    }
++  }
++
++  let repeatedCount = 0;
++  for (let i = signatures.length - 1; i >= 0; i--) {
++    if (signatures[i] !== repeatedSignature) {
++      break;
+     }
++    repeatedCount++;
+   }
+-  if (repeatedCount >= 3) {
++  if (repeatedCount >= 5) {
+     dispatch(
+       errorToolCall({
+         toolCallId,
+@@ -70,7 +87,7 @@ export const callToolById = createAsyncThunk<
+             name: "Repeated tool call stopped",
+             description: "No progress",
+             content:
+-              "The same tool call was repeated 3 times without a new result. Stop and provide a summary or ask for clarification.",
++              "The same tool call was repeated 5 times in a row. Stop and provide a summary or ask for clarification.",
+             hidden: false,
+           },
+         ],
+@@ -86,6 +103,8 @@ export const callToolById = createAsyncThunk<
+     throw new Error("No model selected");
+   }
+ 
++  const toolMode = getToolDeclarationMode(state);
++
+   dispatch(
+     setToolCallCalling({
+       toolCallId,
+@@ -164,7 +183,7 @@ export const callToolById = createAsyncThunk<
              icon: "problems",
              name: "Tool Call Error",
              description: "Tool Call Failed",
 -            content: `${toolCallState.toolCall.function.name} failed with the message: ${error.message}\n\nPlease try something else or request further instructions.`,
-+            content: `${toolCallState.toolCall.function.name} failed with the message: ${error.message}\n\n${toolCallState.tool ? buildToolUsageReminder(toolCallState.tool) : ""}\n\nPlease try something else or request further instructions.`,
++            content: `${toolCallState.toolCall.function.name} failed with the message: ${error.message}\n\n${toolCallState.tool ? buildToolUsageReminder(toolCallState.tool, toolMode) : ""}\n\nPlease try something else or request further instructions.`,
              hidden: false,
            },
          ],
 diff --git a/gui/src/redux/thunks/preprocessToolCallArgs.ts b/gui/src/redux/thunks/preprocessToolCallArgs.ts
-index c51732d99..e79b8f0f6 100644
+index c51732d99..e85886e87 100644
 --- a/gui/src/redux/thunks/preprocessToolCallArgs.ts
 +++ b/gui/src/redux/thunks/preprocessToolCallArgs.ts
 @@ -1,5 +1,9 @@
@@ -3286,7 +5462,21 @@ index c51732d99..e79b8f0f6 100644
  import { ContinueErrorReason } from "core/util/errors";
  
  import { IIdeMessenger } from "../../context/IdeMessenger";
-@@ -23,8 +27,11 @@ export async function preprocessToolCalls(
+@@ -9,11 +13,13 @@ import {
+   updateToolCallOutput,
+ } from "../slices/sessionSlice";
+ import { AppThunkDispatch } from "../store";
++import type { ToolDeclarationMode } from "../util/toolDeclarationMode";
+ 
+ export async function preprocessToolCalls(
+   dispatch: AppThunkDispatch,
+   ideMessenger: IIdeMessenger,
+   generatedToolCalls: ToolCallState[],
++  toolMode: ToolDeclarationMode = "text",
+ ): Promise<void> {
+   // Tool call pre-processing
+   await Promise.all(
+@@ -23,8 +29,11 @@ export async function preprocessToolCalls(
        let preprocessedArgs: Record<string, unknown> | undefined = undefined;
        const result = await ideMessenger.request("tools/preprocessArgs", {
          toolName: tcState.toolCall.function.name,
@@ -3300,24 +5490,53 @@ index c51732d99..e79b8f0f6 100644
            tcState.tool?.function.parameters,
          ),
        });
-@@ -50,7 +57,11 @@ export async function preprocessToolCalls(
+@@ -50,7 +59,11 @@ export async function preprocessToolCalls(
                  icon: "problems",
                  name: "Invalid Tool Call",
                  description: "",
 -                content: `${tcState.toolCall.function.name} failed because the arguments were invalid, with the following message: ${errorMessage}\n\nPlease try something else or request further instructions.`,
 +                content: `${tcState.toolCall.function.name} failed because the arguments were invalid, with the following message: ${errorMessage}\n\n${
-+                  tcState.tool && !errorMessage?.includes("Correct example")
-+                    ? buildToolUsageReminder(tcState.tool)
++                  tcState.tool
++                    ? buildToolUsageReminder(tcState.tool, toolMode)
 +                    : ""
 +                }\n\nPlease try something else or request further instructions.`,
                  hidden: false,
                },
              ],
 diff --git a/gui/src/redux/thunks/streamNormalInput.ts b/gui/src/redux/thunks/streamNormalInput.ts
-index 3f303d29c..98dc66d8c 100644
+index 3f303d29c..81f604e1f 100644
 --- a/gui/src/redux/thunks/streamNormalInput.ts
 +++ b/gui/src/redux/thunks/streamNormalInput.ts
-@@ -113,11 +113,26 @@ export const streamNormalInput = createAsyncThunk<
+@@ -20,8 +20,8 @@ import {
+ } from "../slices/sessionSlice";
+ import { ThunkApiType } from "../store";
+ import { constructMessages } from "../util/constructMessages";
++import { getToolDeclarationMode } from "../util/toolDeclarationMode";
+ 
+-import { modelSupportsNativeTools } from "core/llm/toolSupport";
+ import { applyToolOverrides } from "core/tools/applyToolOverrides";
+ import { addSystemMessageToolsToSystemMessage } from "core/tools/systemMessageTools/buildToolsSystemMessage";
+ import { interceptSystemToolCalls } from "core/tools/systemMessageTools/interceptSystemToolCalls";
+@@ -82,12 +82,16 @@ export const streamNormalInput = createAsyncThunk<
+     { legacySlashCommandData, depth = 0 },
+     { dispatch, extra, getState },
+   ) => {
++    const configuredMaxAgentTurns =
++      getState().config.config.experimental?.maxAgentTurns;
+     const maxAgentTurns =
+-      getState().config.config.experimental?.maxAgentTurns ?? 25;
++      configuredMaxAgentTurns === 0
++        ? Number.POSITIVE_INFINITY
++        : (configuredMaxAgentTurns ?? 100);
+     if (depth > maxAgentTurns) {
+       const message =
+         `Stopped after ${maxAgentTurns} agent tool turns. ` +
+-        `Break the remaining work into smaller steps and continue.`;
++        `Send "continue" to resume, or break the remaining work into smaller steps.`;
+       console.error(message, JSON.stringify(getState(), null, 2));
+       throw new Error(message);
+     }
+@@ -113,11 +117,12 @@ export const streamNormalInput = createAsyncThunk<
        }
      }
  
@@ -3330,26 +5549,12 @@ index 3f303d29c..98dc66d8c 100644
 +    // corporate OpenAI-compatible proxies and local servers, so default to
 +    // the text protocol for Ollama and custom OpenAI endpoints. Users can
 +    // force either mode with experimental.onlyUseSystemMessageTools.
-+    const forceTextTools =
-+      state.config.config.experimental?.onlyUseSystemMessageTools;
-+    const isCustomOpenAICompatible =
-+      selectedChatModel.provider === "openai" &&
-+      (!!selectedChatModel.onPremProxyUrl ||
-+        (!!selectedChatModel.apiBase &&
-+          !selectedChatModel.apiBase.includes("api.openai.com")));
-+    const isLocalProvider = selectedChatModel.provider === "ollama";
-+    const useNativeTools =
-+      forceTextTools === true
-+        ? false
-+        : forceTextTools === false
-+          ? true
-+          : isCustomOpenAICompatible || isLocalProvider
-+            ? false
-+            : modelSupportsNativeTools(selectedChatModel);
++    const toolMode = getToolDeclarationMode(state);
++    const useNativeTools = toolMode === "native";
      const systemToolsFramework = !useNativeTools
        ? new SystemMessageToolCodeblocksFramework()
        : undefined;
-@@ -225,7 +240,7 @@ export const streamNormalInput = createAsyncThunk<
+@@ -225,7 +230,7 @@ export const streamNormalInput = createAsyncThunk<
        // streamThunkWrapper resume the turn. Disable with
        // streamIdleTimeoutMs: 0 (experimental config).
        const idleTimeoutMs =
@@ -3358,6 +5563,61 @@ index 3f303d29c..98dc66d8c 100644
  
        let idleTimer: ReturnType<typeof setTimeout> | undefined;
        const nextWithWatchdog = async () => {
+@@ -357,7 +362,12 @@ export const streamNormalInput = createAsyncThunk<
+       return;
+     }
+     const generatedCalls2 = selectPendingToolCalls(state2);
+-    await preprocessToolCalls(dispatch, extra.ideMessenger, generatedCalls2);
++    await preprocessToolCalls(
++      dispatch,
++      extra.ideMessenger,
++      generatedCalls2,
++      toolMode,
++    );
+ 
+     // 3. Security check: evaluate updated policies based on args
+     const state3 = getState();
+@@ -419,8 +429,27 @@ export const streamNormalInput = createAsyncThunk<
+         return;
+       }
+       if (generatedCalls4.length > 0) {
+-        await Promise.all(
+-          generatedCalls4.map(async ({ toolCallId }) => {
++        const canRunInParallel = generatedCalls4.every(
++          (call) => call.tool?.readonly === true,
++        );
++        if (canRunInParallel) {
++          await Promise.all(
++            generatedCalls4.map(async ({ toolCallId }) => {
++              unwrapResult(
++                await dispatch(
++                  callToolById({
++                    toolCallId,
++                    isAutoApproved: true,
++                    depth: depth + 1,
++                  }),
++                ),
++              );
++            }),
++          );
++        } else {
++          // Keep write/edit calls in the model's order; running them in
++          // parallel can make two edits race on the same file.
++          for (const { toolCallId } of generatedCalls4) {
+             unwrapResult(
+               await dispatch(
+                 callToolById({
+@@ -430,8 +459,8 @@ export const streamNormalInput = createAsyncThunk<
+                 }),
+               ),
+             );
+-          }),
+-        );
++          }
++        }
+       } else {
+         for (const { toolCallId } of originalToolCalls) {
+           unwrapResult(
 diff --git a/gui/src/redux/thunks/streamThunkWrapper.tsx b/gui/src/redux/thunks/streamThunkWrapper.tsx
 index 25ec1bc0b..59f026e38 100644
 --- a/gui/src/redux/thunks/streamThunkWrapper.tsx
@@ -3383,6 +5643,119 @@ index 25ec1bc0b..59f026e38 100644
          const delayMs = OVERLOADED_DELAY_MS * 2 ** attempt;
          await new Promise((resolve) => setTimeout(resolve, delayMs));
          await dispatch(cancelStream());
+diff --git a/gui/src/redux/util/toolDeclarationMode.test.ts b/gui/src/redux/util/toolDeclarationMode.test.ts
+new file mode 100644
+index 000000000..9d390f533
+--- /dev/null
++++ b/gui/src/redux/util/toolDeclarationMode.test.ts
+@@ -0,0 +1,59 @@
++import { describe, expect, it } from "vitest";
++
++import type { RootState } from "../store";
++
++import { getToolDeclarationMode } from "./toolDeclarationMode";
++
++function makeState(
++  model: Record<string, any>,
++  onlyUseSystemMessageTools?: boolean,
++): RootState {
++  return {
++    config: {
++      config: {
++        selectedModelByRole: { chat: model },
++        experimental: { onlyUseSystemMessageTools },
++      },
++    },
++  } as unknown as RootState;
++}
++
++describe("getToolDeclarationMode", () => {
++  const nativeModel = {
++    provider: "openai",
++    model: "gpt-4o",
++    capabilities: { tools: true },
++  };
++
++  it("honours the explicit text override", () => {
++    expect(getToolDeclarationMode(makeState(nativeModel, true))).toBe("text");
++  });
++
++  it("honours the explicit native override", () => {
++    expect(getToolDeclarationMode(makeState(nativeModel, false))).toBe(
++      "native",
++    );
++  });
++
++  it("uses text mode for local Ollama", () => {
++    expect(
++      getToolDeclarationMode(makeState({ ...nativeModel, provider: "ollama" })),
++    ).toBe("text");
++  });
++
++  it("uses text mode for a custom OpenAI-compatible endpoint", () => {
++    expect(
++      getToolDeclarationMode(
++        makeState({ ...nativeModel, apiBase: "https://proxy.example/v1" }),
++      ),
++    ).toBe("text");
++  });
++
++  it("keeps native mode for the public OpenAI endpoint", () => {
++    expect(
++      getToolDeclarationMode(
++        makeState({ ...nativeModel, apiBase: "https://api.openai.com/v1" }),
++      ),
++    ).toBe("native");
++  });
++});
+diff --git a/gui/src/redux/util/toolDeclarationMode.ts b/gui/src/redux/util/toolDeclarationMode.ts
+new file mode 100644
+index 000000000..d31adb54b
+--- /dev/null
++++ b/gui/src/redux/util/toolDeclarationMode.ts
+@@ -0,0 +1,42 @@
++import { modelSupportsNativeTools } from "core/llm/toolSupport";
++
++import { selectSelectedChatModel } from "../slices/configSlice";
++import type { RootState } from "../store";
++
++export type ToolDeclarationMode = "native" | "text";
++
++/**
++ * Single source of truth for native vs text tool declarations.
++ *
++ * Custom OpenAI-compatible endpoints and local Ollama servers default to the
++ * text protocol because native function calling is unreliable there. The
++ * explicit experimental setting still wins. Keeping this decision in one
++ * helper ensures the prompt, the request and the error reminders all use the
++ * same syntax.
++ */
++export function getToolDeclarationMode(state: RootState): ToolDeclarationMode {
++  const model = selectSelectedChatModel(state);
++  if (!model) {
++    return "text";
++  }
++
++  const forced = state.config.config.experimental?.onlyUseSystemMessageTools;
++  if (forced === true) {
++    return "text";
++  }
++  if (forced === false) {
++    return "native";
++  }
++
++  const isCustomOpenAICompatible =
++    model.provider === "openai" &&
++    (!!model.onPremProxyUrl ||
++      (!!model.apiBase && !model.apiBase.includes("api.openai.com")));
++  const isLocalProvider = model.provider === "ollama";
++
++  return isCustomOpenAICompatible || isLocalProvider
++    ? "text"
++    : modelSupportsNativeTools(model)
++      ? "native"
++      : "text";
++}
 diff --git a/gui/src/util/clientTools/callClientTool.ts b/gui/src/util/clientTools/callClientTool.ts
 index abd5af5fc..b00c9b8eb 100644
 --- a/gui/src/util/clientTools/callClientTool.ts
