@@ -1,12 +1,12 @@
 # Installer / compiler Continue (VS Code + CLI) avec les patchs
 
-Ce repo fournit **8 patchs** à appliquer sur `continuedev/continue` (v2.1.0 ou
+Ce repo fournit **9 patchs** à appliquer sur `continuedev/continue` (v2.1.0 ou
 main) qui suppriment les dépendances aux binaires natifs (SQLite natif,
 ripgrep), rendent le build reproductible depuis le registry npm seul et
 corrigent l'activation Windows — pensés pour les postes derrière un proxy
 d'entreprise.
 
-## Les 8 patchs (dans cet ordre)
+## Les 9 patchs (dans cet ordre)
 
 | Ordre | Fichier | Contenu |
 |---|---|---|
@@ -18,8 +18,9 @@ d'entreprise.
 | 6 | `06-continue-agent-performance.patch` | 1 commit : outils agent, boucles et streaming texte |
 | 7 | `07-continue-text-tools.patch` | 1 commit : mode texte fiable OpenAI-compatible, aucun `tools`/`tool_calls` natif, sélection d’outils expliquée, réparation/validation des arguments, alias CLI↔GUI, rappels de syntaxe adaptés au mode natif/texte, `/cd` persistant et restauré au resume/fork, ChangeDirectory, MCP prêt avant la première requête, recherche toujours disponible avec fallback grep/findstr, écritures séquentielles, limite agent portée à 100, virtualisation et anti-débordement GUI sans nouvelle dépendance |
 | 8 | `08-continue-cli-streaming-vscode.patch` | 1 commit : affichage CLI stabilisé (hauteur fixe + queue du streaming, mémoïsation de l’historique, flush de fin), activation VS Code Windows sécurisée (certificats système Node au lieu du binding natif win-ca quand disponible) |
+| 9 | `09-continue-no-web-fullscreen-cli.patch` | 1 commit : suppression complète des tools et context providers web (`search_web`, `fetch_url_content`, `@web`, `@url`, Google/HTTP), blocage des clients réseau dans le terminal (curl, wget, ssh, Invoke-WebRequest, Test-NetConnection…), et TUI plein écran avec viewport interne, scroll clavier/molette, redimensionnement et chatbox toujours en bas |
 
-⚠️ Empilement vérifié : `git am` 14+4+1+6+1+1+1+1 = **29 commits** sur
+⚠️ Empilement vérifié : `git am` 14+4+1+6+1+1+1+1+1 = **30 commits** sur
 `refs/heads/main` propre.
 
 ### Correctifs du patch 07 (vérifiés)
@@ -65,7 +66,7 @@ git clone https://github.com/continuedev/continue continue
 cd continue
 git checkout main
 
-:: télécharger les 8 patchs depuis ce repo (navigateur OK) :
+:: télécharger les 9 patchs depuis ce repo (navigateur OK) :
 ::   raw.githubusercontent.com/samskinov/csharp-examples/main/<fichier>.patch
 git am 01-continue-improvements.patch
 git am 02-continue-cli-modes.patch
@@ -75,6 +76,7 @@ git am 05-continue-vscode-activation.patch
 git am 06-continue-agent-performance.patch
 git am 07-continue-text-tools.patch
 git am 08-continue-cli-streaming-vscode.patch
+git am 09-continue-no-web-fullscreen-cli.patch
 :: (secours si git am échoue : git apply -3 <fichier>)
 ```
 
@@ -451,4 +453,22 @@ Validation finale des patchs 07+08 sur un worktree propre (les 8 patchs réappli
   installation et lancement de VS Code, activation réelle de
   `Continue.continue`, absence de `activation-error.log` ;
 - aucune modification de `package.json`/`package-lock.json`.
+
+Validation du patch 09 sur l’empilement 01→09 (30 commits) avec Node 24.22.3 :
+
+- `git am` du patch 09 sur le commit du patch 08 : OK, arbre propre ;
+- outils web supprimés de core, CLI, GUI, permissions et docs ; `search_web`,
+  `fetch_url_content`, `@web`, `@url`, Google et HTTP ne sont plus exposés ;
+- terminal-security : **241 tests passés**, dont le blocage de `curl`, `wget`,
+  `nc`, `ssh`, `scp`, `rsync`, `Invoke-WebRequest`, `Invoke-RestMethod`,
+  `Start-BitsTransfer` et `Test-NetConnection` ; `git fetch`, `git pull` et
+  `npm install` restent autorisés ;
+- tests CLI complets : **1736 passés**, 27 ignorés (dont les nouveaux tests
+  plein écran, scroll interne et chatbox épinglée en bas) ;
+- tests core complets : **1695 passés**, 16 ignorés ; les 3 échecs restants
+  (`doLoadConfig` mock MCP et timeout streaming) sont préexistants sur le
+  commit du patch 08 ;
+- tests GUI complets : **381 passés** ;
+- builds `packages/terminal-security`, core, CLI et esbuild VS Code : OK ;
+- `tsc` core/CLI/GUI : OK ; aucun changement de `package.json`/lockfile.
 

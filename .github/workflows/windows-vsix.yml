@@ -38,6 +38,7 @@ jobs:
           git am ../06-continue-agent-performance.patch
           git am ../07-continue-text-tools.patch
           git am ../08-continue-cli-streaming-vscode.patch
+          git am ../09-continue-no-web-fullscreen-cli.patch
           git status --short
 
       - name: Build internal packages
