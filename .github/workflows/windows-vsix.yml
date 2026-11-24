@@ -41,23 +41,27 @@ jobs:
           git status --short
 
       - name: Build internal packages
-        shell: cmd
+        shell: pwsh
         run: |
           cd continue
-          node scripts\build-packages.js
+          node scripts/build-packages.js
           cd core
           npm ci --include=dev --ignore-scripts --no-audit --no-fund
           npm run build
-          cd ..\gui
+          if ($LASTEXITCODE -ne 0) { throw "core build failed" }
+          cd ../gui
           npm ci --no-audit --no-fund --ignore-scripts
           npm run build
-          cd ..\extensions\cli
+          if ($LASTEXITCODE -ne 0) { throw "gui build failed" }
+          cd ../extensions/cli
           npm ci --no-audit --no-fund --ignore-scripts
           npm run build
-          cd ..\vscode
+          if ($LASTEXITCODE -ne 0) { throw "CLI build failed" }
+          cd ../vscode
           npm ci --no-audit --no-fund --ignore-scripts
-          set SKIP_INSTALLS=true
+          $env:SKIP_INSTALLS = "true"
           npm run package -- --target win32-x64
+          if ($LASTEXITCODE -ne 0) { throw "VSIX package failed" }
 
       - name: Locate VSIX
         shell: pwsh

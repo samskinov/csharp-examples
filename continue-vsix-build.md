@@ -6,7 +6,7 @@ ripgrep), rendent le build reproductible depuis le registry npm seul et
 corrigent l'activation Windows — pensés pour les postes derrière un proxy
 d'entreprise.
 
-## Les 7 patchs (dans cet ordre)
+## Les 8 patchs (dans cet ordre)
 
 | Ordre | Fichier | Contenu |
 |---|---|---|
@@ -65,7 +65,7 @@ git clone https://github.com/continuedev/continue continue
 cd continue
 git checkout main
 
-:: télécharger les 7 patchs depuis ce repo (navigateur OK) :
+:: télécharger les 8 patchs depuis ce repo (navigateur OK) :
 ::   raw.githubusercontent.com/samskinov/csharp-examples/main/<fichier>.patch
 git am 01-continue-improvements.patch
 git am 02-continue-cli-modes.patch
@@ -436,7 +436,7 @@ CLI et VSIX. Aucun binding natif SQLite/ripgrep n'est requis:
 Validation finale des patchs 07+08 sur un worktree propre (les 8 patchs réappliqués,
 29 commits, `git status` vide) avec Node 24.22.3 :
 
-- `git am` des 7 patchs : OK, **28 commits** ;
+- `git am` des 8 patchs : OK, **29 commits** ;
 - build packages + core + CLI + GUI : OK ;
 - tests CLI complets : **1736 passés**, 29 ignorés ;
 - tests core ciblés (tools, messages, MCP, grep) : **147 passés**, 2 ignorés ;
@@ -445,5 +445,9 @@ Validation finale des patchs 07+08 sur un worktree propre (les 8 patchs réappli
 - `tsc` core/CLI/GUI : OK ;
 - contrôle Chrome headless du composer : aucun débordement horizontal, bouton
   Envoyer visible ;
+- contrôle Windows via GitHub Actions (`windows-latest`) : application des 8
+  patchs, build du VSIX, chargement des bindings natifs Windows (win-ca,
+  LanceDB, onnxruntime), installation et lancement de VS Code, absence de
+  `activation-error.log` ;
 - aucune modification de `package.json`/`package-lock.json`.
 
