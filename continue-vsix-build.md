@@ -470,5 +470,10 @@ Validation du patch 09 sur l’empilement 01→09 (30 commits) avec Node 24.22.3
   commit du patch 08 ;
 - tests GUI complets : **381 passés** ;
 - builds `packages/terminal-security`, core, CLI et esbuild VS Code : OK ;
-- `tsc` core/CLI/GUI : OK ; aucun changement de `package.json`/lockfile.
+- `tsc` core/CLI/GUI : OK ; aucun changement de `package.json`/lockfile ;
+- CI Windows (`windows-latest`, run **45440621810**) : succès, patch 09
+  appliqué, VSIX Windows construit et installé, activation de
+  `Continue.continue` vérifiée sans `activation-error.log` ; l’asset de release
+  `continue-win32-x64-1.3.40.vsix` (70 255 980 octets) a été remplacé par ce
+  build et ne contient plus `search_web`/`fetch_url_content`.
 
