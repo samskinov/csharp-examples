@@ -1,0 +1,310 @@
+From 17dded165a73c679c37f06f9f16190a6a644c2d0 Mon Sep 17 00:00:00 2001
+From: Sam <sam@example.com>
+Date: Tue, 24 Nov 2026 12:21:56 +0100
+Subject: [PATCH] fix(cli): stabilize streaming display and prefer OS
+ certificate store
+
+---
+ core/util/ca.ts                               | 25 +++++++++++
+ extensions/cli/src/ui/TUIChat.tsx             | 15 +++----
+ .../src/ui/components/StaticChatContent.tsx   |  9 +++-
+ .../ui/components/StreamingContent.test.tsx   | 25 +++++++++++
+ .../src/ui/components/StreamingContent.tsx    | 41 +++++++++++++++++++
+ .../src/ui/hooks/useChat.stream.helpers.ts    | 41 +++++++++++++++++--
+ .../cli/src/ui/hooks/useChat.stream.test.ts   | 26 ++++++++++++
+ 7 files changed, 168 insertions(+), 14 deletions(-)
+ create mode 100644 extensions/cli/src/ui/components/StreamingContent.test.tsx
+ create mode 100644 extensions/cli/src/ui/components/StreamingContent.tsx
+
+diff --git a/core/util/ca.ts b/core/util/ca.ts
+index ffcc0459c..b5504ce34 100644
+--- a/core/util/ca.ts
++++ b/core/util/ca.ts
+@@ -1,7 +1,32 @@
+ import { globalAgent } from "https";
++import * as tls from "node:tls";
++
++function systemCertificatesFromNode(): string[] | undefined {
++  // Node 22.15+ can read the operating system trust store itself. Prefer it
++  // over native addons: a mismatched win-ca/mac-ca binary can abort the VS
++  // Code extension host on Windows before activation reports a JS error.
++  const getCACertificates = (
++    tls as { getCACertificates?: (type: string) => string[] }
++  ).getCACertificates;
++  if (typeof getCACertificates !== "function") {
++    return undefined;
++  }
++  try {
++    const certificates = getCACertificates("system");
++    return certificates.length > 0 ? certificates : undefined;
++  } catch {
++    return undefined;
++  }
++}
+ 
+ export async function setupCa() {
+   try {
++    const systemCertificates = systemCertificatesFromNode();
++    if (systemCertificates) {
++      globalAgent.options.ca = systemCertificates;
++      return;
++    }
++
+     switch (process.platform) {
+       case "darwin":
+         // https://www.npmjs.com/package/mac-ca#usage
+diff --git a/extensions/cli/src/ui/TUIChat.tsx b/extensions/cli/src/ui/TUIChat.tsx
+index 26c2bb7f5..a217c52d5 100644
+--- a/extensions/cli/src/ui/TUIChat.tsx
++++ b/extensions/cli/src/ui/TUIChat.tsx
+@@ -28,6 +28,7 @@ import { BottomStatusBar } from "./components/BottomStatusBar.js";
+ import { ResourceDebugBar } from "./components/ResourceDebugBar.js";
+ import { ScreenContent } from "./components/ScreenContent.js";
+ import { StaticChatContent } from "./components/StaticChatContent.js";
++import { StreamingContent } from "./components/StreamingContent.js";
+ import { useNavigation } from "./context/NavigationContext.js";
+ import { useChat } from "./hooks/useChat.js";
+ import { useContextPercentage } from "./hooks/useContextPercentage.js";
+@@ -422,14 +423,10 @@ const TUIChat: React.FC<TUIChatProps> = ({
+           refreshTrigger={staticRefreshTrigger}
+         />
+ 
+-        {/* Live streaming display - in-progress assistant content, flushed
+-            in batches by createStreamCallbacks */}
+-        {streamingContent !== null && streamingContent !== "" && (
+-          <Box marginBottom={1} paddingLeft={0}>
+-            <Text color="white">●</Text>
+-            <Text> </Text>
+-            <Text wrap="wrap">{streamingContent}</Text>
+-          </Box>
++        {/* Live streaming display - fixed height, tail-only. The final
++            assistant message is written once to the static history. */}
++        {isWaitingForResponse && (
++          <StreamingContent content={streamingContent ?? ""} />
+         )}
+       </Box>
+ 
+@@ -440,7 +437,7 @@ const TUIChat: React.FC<TUIChatProps> = ({
+           visible={isWaitingForResponse && !!responseStartTime}
+           startTime={responseStartTime || 0}
+           message=""
+-          showSpinner={true}
++          showSpinner={!streamingContent}
+           additionalHint={
+             isBashToolRunning ? "ctrl+b to background" : undefined
+           }
+diff --git a/extensions/cli/src/ui/components/StaticChatContent.tsx b/extensions/cli/src/ui/components/StaticChatContent.tsx
+index 8921d55af..0b42823b9 100644
+--- a/extensions/cli/src/ui/components/StaticChatContent.tsx
++++ b/extensions/cli/src/ui/components/StaticChatContent.tsx
+@@ -25,7 +25,7 @@ interface StaticChatContentProps {
+   refreshTrigger?: number;
+ }
+ 
+-export const StaticChatContent: React.FC<StaticChatContentProps> = ({
++const StaticChatContentImpl: React.FC<StaticChatContentProps> = ({
+   showIntroMessage,
+   config,
+   model,
+@@ -152,3 +152,10 @@ export const StaticChatContent: React.FC<StaticChatContentProps> = ({
+     </Box>
+   );
+ };
++
++/**
++ * Streaming updates only change TUIChat's live preview. Memoizing the static
++ * transcript keeps Ink from reconciling every completed message on each
++ * streamed chunk.
++ */
++export const StaticChatContent = React.memo(StaticChatContentImpl);
+diff --git a/extensions/cli/src/ui/components/StreamingContent.test.tsx b/extensions/cli/src/ui/components/StreamingContent.test.tsx
+new file mode 100644
+index 000000000..d7a6977f6
+--- /dev/null
++++ b/extensions/cli/src/ui/components/StreamingContent.test.tsx
+@@ -0,0 +1,25 @@
++import { render } from "ink-testing-library";
++import React from "react";
++
++import { StreamingContent } from "./StreamingContent.js";
++
++describe("StreamingContent", () => {
++  it("keeps a fixed tail so streaming does not resize the terminal", () => {
++    const content = Array.from({ length: 20 }, (_, i) => `line ${i}`).join(
++      "\n",
++    );
++
++    const { lastFrame } = render(<StreamingContent content={content} />);
++    const frame = lastFrame() ?? "";
++    const lines = frame.split("\n");
++
++    expect(frame).toContain("line 19");
++    expect(frame).not.toContain("line 0\n");
++    expect(lines.length).toBeLessThanOrEqual(10);
++  });
++
++  it("still renders a status line before the first token", () => {
++    const { lastFrame } = render(<StreamingContent content="" />);
++    expect(lastFrame()).toContain("●");
++  });
++});
+diff --git a/extensions/cli/src/ui/components/StreamingContent.tsx b/extensions/cli/src/ui/components/StreamingContent.tsx
+new file mode 100644
+index 000000000..d68ca7e6b
+--- /dev/null
++++ b/extensions/cli/src/ui/components/StreamingContent.tsx
+@@ -0,0 +1,41 @@
++import { Box, Text } from "ink";
++import React from "react";
++
++import { useTerminalSize } from "../hooks/useTerminalSize.js";
++
++/**
++ * Fixed-height live preview for streamed assistant text.
++ *
++ * Ink redraws the dynamic area on every state update. If the preview grows
++ * line by line, each newline changes the layout and can make the terminal
++ * scroll or flicker (especially on Windows). Keeping a constant number of
++ * rows and showing only the tail makes every update a same-size repaint.
++ */
++export function StreamingContent(props: { content: string }) {
++  const { columns, rows } = useTerminalSize();
++  const maxLines = Math.max(3, Math.min(8, Math.floor(rows / 4)));
++  const maxChars = Math.max(1000, columns * maxLines * 4);
++  const content = props.content.replace(/\r\n/g, "\n");
++  const clipped = content.length > maxChars;
++  const tail = clipped ? content.slice(-maxChars) : content;
++  const lines = tail.split("\n").slice(-maxLines);
++
++  if (lines.length === 0) {
++    lines.push("");
++  }
++
++  return (
++    <Box
++      flexDirection="column"
++      height={maxLines}
++      flexShrink={0}
++      overflow="hidden"
++    >
++      {lines.map((line, index) => (
++        <Text key={index} wrap="truncate-end">
++          {index === 0 ? `${clipped ? "… " : "● "}${line}` : line || " "}
++        </Text>
++      ))}
++    </Box>
++  );
++}
+diff --git a/extensions/cli/src/ui/hooks/useChat.stream.helpers.ts b/extensions/cli/src/ui/hooks/useChat.stream.helpers.ts
+index 1f2937777..31ccc7362 100644
+--- a/extensions/cli/src/ui/hooks/useChat.stream.helpers.ts
++++ b/extensions/cli/src/ui/hooks/useChat.stream.helpers.ts
+@@ -32,24 +32,55 @@ export function createStreamCallbacks(
+ 
+   // Live streaming: deltas are buffered and flushed at most every
+   // STREAMING_FLUSH_INTERVAL_MS so the Ink UI re-renders a handful of times
+-  // per second instead of on every token.
+-  const STREAMING_FLUSH_INTERVAL_MS = 200;
++  // per second instead of on every token. The trailing timer guarantees the
++  // last tokens are shown even when the provider pauses after a delta.
++  const STREAMING_FLUSH_INTERVAL_MS = 150;
+   let streamingBuffer = "";
+   let lastStreamingFlush = 0;
++  let flushTimer: ReturnType<typeof setTimeout> | null = null;
++
++  const clearFlushTimer = () => {
++    if (!flushTimer) return;
++    clearTimeout(flushTimer);
++    flushTimer = null;
++  };
++
++  const flushStreaming = () => {
++    clearFlushTimer();
++    if (!setStreamingContent) return;
++    lastStreamingFlush = Date.now();
++    setStreamingContent(streamingBuffer);
++  };
++
++  const scheduleFlush = () => {
++    if (!setStreamingContent || flushTimer) return;
++    const delay = Math.max(
++      0,
++      STREAMING_FLUSH_INTERVAL_MS - (Date.now() - lastStreamingFlush),
++    );
++    flushTimer = setTimeout(() => {
++      flushTimer = null;
++      if (streamingBuffer) {
++        flushStreaming();
++      }
++    }, delay);
++  };
+ 
+   return {
+     onContent: (delta: string) => {
+       if (!setStreamingContent) return;
+       streamingBuffer += delta;
+       if (Date.now() - lastStreamingFlush >= STREAMING_FLUSH_INTERVAL_MS) {
+-        lastStreamingFlush = Date.now();
+-        setStreamingContent(streamingBuffer);
++        flushStreaming();
++      } else {
++        scheduleFlush();
+       }
+     },
+ 
+     onStreamReset: () => {
+       // A mid-stream retry discarded the partial content of the failed
+       // attempt: clear the streaming display before the new attempt.
++      clearFlushTimer();
+       streamingBuffer = "";
+       setStreamingContent?.("");
+     },
+@@ -57,6 +88,8 @@ export function createStreamCallbacks(
+     onContentComplete: async (content: string) => {
+       // The final assistant message lands in the chat history: the live
+       // streaming display is no longer needed.
++      clearFlushTimer();
++      streamingBuffer = "";
+       setStreamingContent?.(null);
+       // Do not add assistant messages via service; handleToolCalls is the single writer
+       // For environments where the service isn't ready (unit tests), update local state only
+diff --git a/extensions/cli/src/ui/hooks/useChat.stream.test.ts b/extensions/cli/src/ui/hooks/useChat.stream.test.ts
+index 73e8754a6..c8feeecf7 100644
+--- a/extensions/cli/src/ui/hooks/useChat.stream.test.ts
++++ b/extensions/cli/src/ui/hooks/useChat.stream.test.ts
+@@ -4,6 +4,32 @@ import { describe, expect, it, vi } from "vitest";
+ import { createStreamCallbacks } from "./useChat.stream.helpers.js";
+ 
+ describe("useChat streaming", () => {
++  it("flushes buffered text after a provider pause", async () => {
++    vi.useFakeTimers();
++    try {
++      const setStreamingContent = vi.fn();
++      const callbacks = createStreamCallbacks({
++        setChatHistory: vi.fn(),
++        setActivePermissionRequest: vi.fn(),
++        setStreamingContent,
++      });
++
++      callbacks.onContent("first");
++      expect(setStreamingContent).toHaveBeenLastCalledWith("first");
++
++      callbacks.onContent(" second");
++      expect(setStreamingContent).toHaveBeenLastCalledWith("first");
++
++      vi.advanceTimersByTime(150);
++      expect(setStreamingContent).toHaveBeenLastCalledWith("first second");
++
++      await callbacks.onContentComplete("first second");
++      expect(setStreamingContent).toHaveBeenLastCalledWith(null);
++    } finally {
++      vi.useRealTimers();
++    }
++  });
++
+   it("should handle content completion", () => {
+     let chatHistory: ChatHistoryItem[] = [];
+ 
+-- 
+2.53.0
+

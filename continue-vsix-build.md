@@ -1,6 +1,6 @@
 # Installer / compiler Continue (VS Code + CLI) avec les patchs
 
-Ce repo fournit **7 patchs** à appliquer sur `continuedev/continue` (v2.1.0 ou
+Ce repo fournit **8 patchs** à appliquer sur `continuedev/continue` (v2.1.0 ou
 main) qui suppriment les dépendances aux binaires natifs (SQLite natif,
 ripgrep), rendent le build reproductible depuis le registry npm seul et
 corrigent l'activation Windows — pensés pour les postes derrière un proxy
@@ -17,8 +17,9 @@ d'entreprise.
 | 5 | `05-continue-vscode-activation.patch` | 1 commit : logs d'activation, `system-ca` dynamique, binding `win-ca` |
 | 6 | `06-continue-agent-performance.patch` | 1 commit : outils agent, boucles et streaming texte |
 | 7 | `07-continue-text-tools.patch` | 1 commit : mode texte fiable OpenAI-compatible, aucun `tools`/`tool_calls` natif, sélection d’outils expliquée, réparation/validation des arguments, alias CLI↔GUI, rappels de syntaxe adaptés au mode natif/texte, `/cd` persistant et restauré au resume/fork, ChangeDirectory, MCP prêt avant la première requête, recherche toujours disponible avec fallback grep/findstr, écritures séquentielles, limite agent portée à 100, virtualisation et anti-débordement GUI sans nouvelle dépendance |
+| 8 | `08-continue-cli-streaming-vscode.patch` | 1 commit : affichage CLI stabilisé (hauteur fixe + queue du streaming, mémoïsation de l’historique, flush de fin), activation VS Code Windows sécurisée (certificats système Node au lieu du binding natif win-ca quand disponible) |
 
-⚠️ Empilement vérifié : `git am` 14+4+1+6+1+1+1 = **28 commits** sur
+⚠️ Empilement vérifié : `git am` 14+4+1+6+1+1+1+1 = **29 commits** sur
 `refs/heads/main` propre.
 
 ### Correctifs du patch 07 (vérifiés)
@@ -73,6 +74,7 @@ git am 04-continue-cli-tools.patch
 git am 05-continue-vscode-activation.patch
 git am 06-continue-agent-performance.patch
 git am 07-continue-text-tools.patch
+git am 08-continue-cli-streaming-vscode.patch
 :: (secours si git am échoue : git apply -3 <fichier>)
 ```
 
@@ -431,12 +433,12 @@ CLI et VSIX. Aucun binding natif SQLite/ripgrep n'est requis:
 - les scripts `--ignore-scripts` évitent les téléchargements Sharp/Puppeteer
   sans bloquer le build.
 
-Validation finale du patch 07 sur un worktree propre (les 7 patchs réappliqués,
-28 commits, `git status` vide) avec Node 24.22.3 :
+Validation finale des patchs 07+08 sur un worktree propre (les 8 patchs réappliqués,
+29 commits, `git status` vide) avec Node 24.22.3 :
 
 - `git am` des 7 patchs : OK, **28 commits** ;
 - build packages + core + CLI + GUI : OK ;
-- tests CLI complets : **1733 passés**, 29 ignorés ;
+- tests CLI complets : **1736 passés**, 29 ignorés ;
 - tests core ciblés (tools, messages, MCP, grep) : **147 passés**, 2 ignorés ;
 - tests MCP CLI : **20 passés** ;
 - tests GUI (chat, tools, virtualisation, mode de déclaration) : **50 passés** ;
