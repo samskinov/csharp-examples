@@ -438,7 +438,7 @@ Validation finale des patchs 07+08 sur un worktree propre (les 8 patchs réappli
 
 - `git am` des 8 patchs : OK, **29 commits** ;
 - build packages + core + CLI + GUI : OK ;
-- tests CLI complets : **1736 passés**, 29 ignorés ;
+- tests CLI complets : **1737 passés**, 29 ignorés ;
 - tests core ciblés (tools, messages, MCP, grep) : **147 passés**, 2 ignorés ;
 - tests MCP CLI : **20 passés** ;
 - tests GUI (chat, tools, virtualisation, mode de déclaration) : **50 passés** ;

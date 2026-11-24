@@ -1,4 +1,4 @@
-From 17dded165a73c679c37f06f9f16190a6a644c2d0 Mon Sep 17 00:00:00 2001
+From 0eab00ef687e246a4afb86a68afde8290beb58fb Mon Sep 17 00:00:00 2001
 From: Sam <sam@example.com>
 Date: Tue, 24 Nov 2026 12:21:56 +0100
 Subject: [PATCH] fix(cli): stabilize streaming display and prefer OS
@@ -8,11 +8,11 @@ Subject: [PATCH] fix(cli): stabilize streaming display and prefer OS
  core/util/ca.ts                               | 25 +++++++++++
  extensions/cli/src/ui/TUIChat.tsx             | 15 +++----
  .../src/ui/components/StaticChatContent.tsx   |  9 +++-
- .../ui/components/StreamingContent.test.tsx   | 25 +++++++++++
+ .../ui/components/StreamingContent.test.tsx   | 38 +++++++++++++++++
  .../src/ui/components/StreamingContent.tsx    | 41 +++++++++++++++++++
  .../src/ui/hooks/useChat.stream.helpers.ts    | 41 +++++++++++++++++--
  .../cli/src/ui/hooks/useChat.stream.test.ts   | 26 ++++++++++++
- 7 files changed, 168 insertions(+), 14 deletions(-)
+ 7 files changed, 181 insertions(+), 14 deletions(-)
  create mode 100644 extensions/cli/src/ui/components/StreamingContent.test.tsx
  create mode 100644 extensions/cli/src/ui/components/StreamingContent.tsx
 
@@ -119,10 +119,10 @@ index 8921d55af..0b42823b9 100644
 +export const StaticChatContent = React.memo(StaticChatContentImpl);
 diff --git a/extensions/cli/src/ui/components/StreamingContent.test.tsx b/extensions/cli/src/ui/components/StreamingContent.test.tsx
 new file mode 100644
-index 000000000..d7a6977f6
+index 000000000..78238c6c8
 --- /dev/null
 +++ b/extensions/cli/src/ui/components/StreamingContent.test.tsx
-@@ -0,0 +1,25 @@
+@@ -0,0 +1,38 @@
 +import { render } from "ink-testing-library";
 +import React from "react";
 +
@@ -141,6 +141,19 @@ index 000000000..d7a6977f6
 +    expect(frame).toContain("line 19");
 +    expect(frame).not.toContain("line 0\n");
 +    expect(lines.length).toBeLessThanOrEqual(10);
++  });
++
++  it("keeps the same frame height as content grows", () => {
++    const { lastFrame, rerender } = render(
++      <StreamingContent content="first line" />,
++    );
++    const initialHeight = (lastFrame() ?? "").split("\n").length;
++
++    rerender(
++      <StreamingContent content={Array.from({ length: 20 }, (_, i) => `line ${i}`).join("\n")} />,
++    );
++
++    expect((lastFrame() ?? "").split("\n").length).toBe(initialHeight);
 +  });
 +
 +  it("still renders a status line before the first token", () => {

@@ -168,6 +168,9 @@ jobs:
 
           $logRoot = Join-Path $userData "logs"
           if (-not (Test-Path $logRoot)) { throw "VS Code logs directory was not created" }
+          if (-not (Test-Path (Join-Path $env:USERPROFILE ".continue"))) {
+            throw "Continue did not initialize its home directory"
+          }
           $hits = Get-ChildItem -Recurse -File $logRoot |
             Select-String -Pattern "Continue activation failed", "Error activating the Continue extension"
           if ($hits) {
