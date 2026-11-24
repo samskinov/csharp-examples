@@ -121,7 +121,7 @@ jobs:
           if (-not (Test-Path $codeExe)) {
             $vscodeZip = Join-Path $env:RUNNER_TEMP "vscode-win32-x64.zip"
             Remove-Item -Force $vscodeZip -ErrorAction SilentlyContinue
-            Invoke-WebRequest "https://update.code.visualstudio.com/latest/win32-x64/stable" -OutFile $vscodeZip
+            Invoke-WebRequest "https://update.code.visualstudio.com/latest/win32-x64-archive/stable" -OutFile $vscodeZip
             Remove-Item -Recurse -Force $vscodeDir -ErrorAction SilentlyContinue
             Expand-Archive -Path $vscodeZip -DestinationPath $vscodeDir -Force
           }
