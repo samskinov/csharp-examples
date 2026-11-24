@@ -445,9 +445,10 @@ Validation finale des patchs 07+08 sur un worktree propre (les 8 patchs réappli
 - `tsc` core/CLI/GUI : OK ;
 - contrôle Chrome headless du composer : aucun débordement horizontal, bouton
   Envoyer visible ;
-- contrôle Windows via GitHub Actions (`windows-latest`) : application des 8
-  patchs, build du VSIX, chargement des bindings natifs Windows (win-ca,
-  LanceDB, onnxruntime), installation et lancement de VS Code, absence de
-  `activation-error.log` ;
+- contrôle Windows via GitHub Actions (`windows-latest`) : **run réussi**
+  (45387486547), application des 8 patchs, build du VSIX, chargement des
+  bindings natifs Windows (LanceDB, onnxruntime, certificats système),
+  installation et lancement de VS Code, activation réelle de
+  `Continue.continue`, absence de `activation-error.log` ;
 - aucune modification de `package.json`/`package-lock.json`.
 
