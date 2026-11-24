@@ -107,22 +107,29 @@ jobs:
           $onnx = Join-Path $root "bin\napi-v3\win32\x64\onnxruntime_binding.node"
           $env:PATH = (Split-Path $onnx) + ";" + $env:PATH
           node -e "require(process.argv[1]); console.log('onnxruntime binding ok')" $onnx
-          node -e "require(process.argv[1]); console.log('win-ca crypt32 ok')" (Join-Path $root "out\crypt32-x64.node")
+          if ($LASTEXITCODE -ne 0) { throw "onnxruntime binding failed" }
+          node -e "const tls=require('node:tls'); const c=tls.getCACertificates('system'); if (!c || !c.length) throw new Error('no system CAs'); console.log('system CA ok', c.length)"
+          if ($LASTEXITCODE -ne 0) { throw "system certificate store unavailable" }
           node -e "require(process.argv[1]); console.log('lancedb ok')" (Join-Path $root "out\node_modules\@lancedb\vectordb-win32-x64-msvc\index.node")
+          if ($LASTEXITCODE -ne 0) { throw "lancedb binding failed" }
 
       - name: Install and launch VSIX in VS Code
         shell: pwsh
         run: |
-          $code = (Get-Command code -ErrorAction SilentlyContinue).Source
-          if (-not $code) { $code = "C:\Program Files\Microsoft VS Code\bin\code.cmd" }
-          if (-not (Test-Path $code)) {
+          $vscodeDir = Join-Path $env:RUNNER_TEMP "vscode-win32-x64"
+          $codeExe = Join-Path $vscodeDir "Code.exe"
+          if (-not (Test-Path $codeExe)) {
             $vscodeZip = Join-Path $env:RUNNER_TEMP "vscode-win32-x64.zip"
-            $vscodeDir = Join-Path $env:RUNNER_TEMP "vscode-win32-x64"
+            Remove-Item -Force $vscodeZip -ErrorAction SilentlyContinue
             Invoke-WebRequest "https://update.code.visualstudio.com/latest/win32-x64/stable" -OutFile $vscodeZip
+            Remove-Item -Recurse -Force $vscodeDir -ErrorAction SilentlyContinue
             Expand-Archive -Path $vscodeZip -DestinationPath $vscodeDir -Force
-            $code = Join-Path $vscodeDir "bin\code.cmd"
           }
-          if (-not (Test-Path $code)) { throw "VS Code CLI not found" }
+          $code = Join-Path $vscodeDir "bin\code.cmd"
+          if (-not (Test-Path $code) -or -not (Test-Path $codeExe)) { throw "VS Code CLI not found" }
+          Write-Host "Using VS Code: $code"
+          & $code --version
+          if ($LASTEXITCODE -ne 0) { throw "VS Code CLI failed to start" }
 
           $userData = Join-Path $env:RUNNER_TEMP "continue-vscode-user"
           $extensions = Join-Path $env:RUNNER_TEMP "continue-vscode-ext"
@@ -134,15 +141,20 @@ jobs:
           & $code --user-data-dir $userData --extensions-dir $extensions --list-extensions --show-versions
           if ($LASTEXITCODE -ne 0) { throw "VS Code extension listing failed" }
 
-          $launch = Join-Path $env:RUNNER_TEMP "launch-continue-vscode.cmd"
-          @"
-          @echo off
-          "$code" --user-data-dir "$userData" --extensions-dir "$extensions" --disable-workspace-trust --disable-gpu --skip-welcome --skip-release-notes --disable-telemetry --disable-updates "$env:GITHUB_WORKSPACE"
-          "@ | Set-Content -Path $launch -Encoding ASCII
-
-          $process = Start-Process -FilePath "cmd.exe" -ArgumentList "/c", "`"$launch`"" -PassThru
+          $process = Start-Process -FilePath $codeExe -ArgumentList @(
+            "--user-data-dir", $userData,
+            "--extensions-dir", $extensions,
+            "--disable-workspace-trust",
+            "--disable-gpu",
+            "--skip-welcome",
+            "--skip-release-notes",
+            "--disable-telemetry",
+            "--disable-updates",
+            "$env:GITHUB_WORKSPACE"
+          ) -PassThru
           Start-Sleep -Seconds 35
           if (-not $process.HasExited) { taskkill /PID $process.Id /T /F | Out-Null }
+          Get-Process Code -ErrorAction SilentlyContinue | Stop-Process -Force
 
       - name: Assert Windows activation succeeded
         shell: pwsh
